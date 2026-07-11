@@ -104,15 +104,15 @@ export async function main(argv: string[]): Promise<number> {
       return run.code;
     }
     case "mine":
-      return emit(runMine({ repoRoot: cwd, json, force }));
+      return emit(await runMine({ repoRoot: cwd, json, force }));
     case "gate":
-      return emit(runGate({ repoRoot: cwd, json, force }));
+      return emit(await runGate({ repoRoot: cwd, json, force }));
     case "run":
-      return emit(runRun({ repoRoot: cwd, json, force, config: flagValue(args, "config") }));
+      return emit(await runRun({ repoRoot: cwd, json, force, config: flagValue(args, "config") }));
     case "score":
-      return emit(runScore({ repoRoot: cwd, json, force, runId: positionals[1] }));
+      return emit(await runScore({ repoRoot: cwd, json, force, runId: positionals[1] }));
     case "report":
-      return emit(runReport({ repoRoot: cwd, json }));
+      return emit(await runReport({ repoRoot: cwd, json }));
     case undefined:
       process.stderr.write(USAGE + "\n");
       return EXIT.USAGE;

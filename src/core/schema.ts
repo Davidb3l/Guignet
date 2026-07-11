@@ -11,6 +11,15 @@
  */
 import { z } from "zod";
 
+/** The discovery heuristics that can surface a candidate (ARCHITECTURE.md §5). */
+export const DiscoveredBySchema = z.enum([
+  "test-source-delta",
+  "conventional",
+  "loose-prefix",
+  "issue-linked",
+]);
+export type DiscoveredBy = z.infer<typeof DiscoveredBySchema>;
+
 /** How a task is categorized at mine time (ARCHITECTURE.md §5, Guignet.md taxonomy). */
 export const TaxonomySchema = z.object({
   kind: z.enum(["bugfix", "feature", "refactor"]),
@@ -64,6 +73,23 @@ export const ConfigSchema = z.object({
   cutoffs: z.record(z.string(), z.string()).optional(),
   /** Validity-gate replay count `k` (§ gate). Default 2. */
   gateReplays: z.number().int().positive().default(2),
+  /** Per-verifier-run wall-clock cap (ms). A run exceeding it is treated as an
+   * unsound task, not a slow one, so this sits well above an honest suite.
+   * Default 600_000 (10 min). */
+  verifierTimeoutMs: z.number().int().positive().default(600_000),
+  /** Discovery tuning for `mine` (§5). Sensible defaults live in the code. */
+  discovery: z
+    .object({
+      /** How many first-parent commits to walk (newest-first). Default 1000. */
+      limit: z.number().int().positive().optional(),
+      /**
+       * A JS-regex source (no slashes) for the loose "scope: summary" prefix
+       * heuristic, e.g. matching `GL: …` / `security: …`. Anchored at the start
+       * of the subject. When omitted, a built-in default is used.
+       */
+      loosePrefix: z.string().optional(),
+    })
+    .optional(),
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -87,7 +113,7 @@ export const TaskSchema = z.object({
   /** The verifier command to run (usually the repo test cmd, possibly scoped). */
   verifierCmd: z.string(),
   /** Which discovery heuristics matched (mining-quality debug surface, §5). */
-  discoveredBy: z.array(z.enum(["test-source-delta", "conventional", "loose-prefix", "issue-linked"])),
+  discoveredBy: z.array(DiscoveredBySchema),
   /**
    * Optional consistent rename map for mutation mode (§7, v1). Present in the
    * schema now so v1 needs no migration; unset in v0.
@@ -115,6 +141,33 @@ export const GateSchema = z.object({
   discardReason: z.string().nullable(),
 });
 export type Gate = z.infer<typeof GateSchema>;
+
+/**
+ * One discovered commit and what became of it: an entry in the candidate log
+ * (`.guignet/candidates.json`). Records EVERY commit discovery considered — the
+ * ones reconstructed into tasks and the ones discarded, with the reason. This
+ * is the mining-quality debug surface (ARCHITECTURE.md §5). Note it carries no
+ * diff content — it lives outside the firewall.
+ */
+export const CandidateSchema = z.object({
+  sha: z.string(),
+  subject: z.string(),
+  date: z.string(),
+  discoveredBy: z.array(DiscoveredBySchema),
+  outcome: z.enum(["reconstructed", "discarded"]),
+  /** The task id when reconstructed; null when discarded. */
+  taskId: z.string().nullable(),
+  /** Why it was discarded (empty when reconstructed) — mining-quality signal. */
+  discardReason: z.string().nullable(),
+});
+export type Candidate = z.infer<typeof CandidateSchema>;
+
+/** The candidate log: `.guignet/candidates.json`, written by `mine`. */
+export const CandidateLogSchema = z.object({
+  minedAt: z.string(),
+  candidates: z.array(CandidateSchema),
+});
+export type CandidateLog = z.infer<typeof CandidateLogSchema>;
 
 /** The admitted suite manifest: `.guignet/suite.json` (§ gate). */
 export const SuiteSchema = z.object({

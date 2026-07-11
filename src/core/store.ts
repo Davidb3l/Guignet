@@ -18,10 +18,12 @@ import { dirname, join } from "node:path";
 import type { z } from "zod";
 
 import {
+  CandidateLogSchema,
   ConfigSchema,
   GateSchema,
   SuiteSchema,
   TaskSchema,
+  type CandidateLog,
   type Config,
   type Gate,
   type Suite,
@@ -39,6 +41,22 @@ export function configPath(repoRoot: string): string {
 
 export function suitePath(repoRoot: string): string {
   return join(storeRoot(repoRoot), "suite.json");
+}
+
+export function candidatesPath(repoRoot: string): string {
+  return join(storeRoot(repoRoot), "candidates.json");
+}
+
+/** List the task ids present on disk (the reconstructed tasks `gate` evaluates). */
+export async function listTaskIds(repoRoot: string): Promise<string[]> {
+  const dir = join(storeRoot(repoRoot), "tasks");
+  try {
+    const { readdir } = await import("node:fs/promises");
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch {
+    return [];
+  }
 }
 
 export function taskDir(repoRoot: string, taskId: string): string {
@@ -121,4 +139,12 @@ export function readGate(repoRoot: string, taskId: string): Promise<Gate> {
 
 export function writeGate(repoRoot: string, gate: Gate): Promise<void> {
   return writeJson(join(taskDir(repoRoot, gate.taskId), "gate.json"), GateSchema, gate);
+}
+
+export function readCandidateLog(repoRoot: string): Promise<CandidateLog> {
+  return readJson(candidatesPath(repoRoot), CandidateLogSchema);
+}
+
+export function writeCandidateLog(repoRoot: string, log: CandidateLog): Promise<void> {
+  return writeJson(candidatesPath(repoRoot), CandidateLogSchema, log);
 }

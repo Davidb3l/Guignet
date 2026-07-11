@@ -11,3 +11,4 @@ export * from "./schema.ts";
 export * from "./store.ts";
 export * from "./events.ts";
 export * from "./git.ts";
+export * from "./proc.ts";
