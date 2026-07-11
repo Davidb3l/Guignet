@@ -69,13 +69,12 @@ describe("guignet CLI", () => {
     expect(obj.ok).toBe(false);
   });
 
-  test("still-unimplemented stages (score/report) → exit 1 with a clear message", async () => {
+  test("report on a repo with no store fails cleanly (exit 1), not with a stub message", async () => {
     const repo = await tmp();
-    for (const cmd of ["score", "report"]) {
-      const r = await guignet([cmd], repo);
-      expect(r.code).toBe(1);
-      expect(r.stderr).toContain("not implemented");
-    }
+    const r = await guignet(["report"], repo);
+    expect(r.code).toBe(1);
+    expect(r.stderr).not.toContain("not implemented");
+    expect(r.stderr.toLowerCase()).toContain("store");
   });
 
   test("mine/gate on a repo with no config fail cleanly (exit 1), not with a stub message", async () => {

@@ -1,0 +1,14 @@
+{
+  "version": "2026-07-11",
+  "note": "Illustrative default training-cutoff dates (ISO). These are DEFAULTS, not authoritative — override per model in .guignet/config.json `cutoffs`. Every report prints the registry version it used so a reader knows exactly which dates produced the pre/post split.",
+  "cutoffs": {
+    "claude-opus-4-8": "2026-01-01",
+    "claude-sonnet-5": "2026-01-01",
+    "claude-haiku-4-5": "2025-08-01",
+    "claude-fable-5": "2026-01-01",
+    "opus": "2026-01-01",
+    "sonnet": "2026-01-01",
+    "haiku": "2025-08-01",
+    "fable": "2026-01-01"
+  }
+}

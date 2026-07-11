@@ -28,6 +28,7 @@ import {
   RunConfigSchema,
   SuiteSchema,
   TaskSchema,
+  VerdictSchema,
   type Attempt,
   type CandidateLog,
   type Config,
@@ -35,6 +36,7 @@ import {
   type RunConfig,
   type Suite,
   type Task,
+  type Verdict,
 } from "./schema.ts";
 
 /** The store root inside a target repo. */
@@ -208,4 +210,80 @@ export async function writeSolutionDiff(
   const dir = attemptDir(repoRoot, runId, taskId, attempt);
   await fsMkdir(dir, { recursive: true });
   await fsWriteFile(join(dir, "solution.diff"), diff, "utf-8");
+}
+
+/** Read an attempt's produced diff (empty string if absent). */
+export async function readSolutionDiff(repoRoot: string, runId: string, taskId: string, attempt: number): Promise<string> {
+  try {
+    return await readFile(join(attemptDir(repoRoot, runId, taskId, attempt), "solution.diff"), "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+// --- verdicts (§ score): runs/<runId>/attempts/<taskId>/<n>/verdict.json ---
+
+export function readVerdict(repoRoot: string, runId: string, taskId: string, attempt: number): Promise<Verdict> {
+  return readJson(join(attemptDir(repoRoot, runId, taskId, attempt), "verdict.json"), VerdictSchema);
+}
+
+export function writeVerdict(repoRoot: string, runId: string, v: Verdict): Promise<void> {
+  return writeJson(join(attemptDir(repoRoot, runId, v.taskId, v.attempt), "verdict.json"), VerdictSchema, v);
+}
+
+export function verdictExists(repoRoot: string, runId: string, taskId: string, attempt: number): boolean {
+  return fsExistsSync(join(attemptDir(repoRoot, runId, taskId, attempt), "verdict.json"));
+}
+
+/** Every (taskId, attempt) that exists on disk for a run — the unit of scoring
+ * and reporting. Scans the attempts tree; returns them sorted and stable. */
+export async function listRunAttempts(repoRoot: string, runId: string): Promise<{ taskId: string; attempt: number }[]> {
+  const { readdir } = await import("node:fs/promises");
+  const base = join(runDir(repoRoot, runId), "attempts");
+  const out: { taskId: string; attempt: number }[] = [];
+  let taskDirs: string[];
+  try {
+    taskDirs = (await readdir(base, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+  for (const taskId of taskDirs.sort()) {
+    let nums: string[];
+    try {
+      nums = (await readdir(join(base, taskId), { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch {
+      continue;
+    }
+    for (const n of nums.map(Number).filter((n) => Number.isInteger(n) && n > 0).sort((a, b) => a - b)) {
+      out.push({ taskId, attempt: n });
+    }
+  }
+  return out;
+}
+
+/** The run ids present on disk (report aggregates across all of them). */
+export async function listRuns(repoRoot: string): Promise<string[]> {
+  const { readdir } = await import("node:fs/promises");
+  try {
+    const entries = await readdir(join(storeRoot(repoRoot), "runs"), { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  } catch {
+    return [];
+  }
+}
+
+// --- reports (§ report): reports/<timestamp>/guignet-report.{html,json} ---
+
+export function reportsRoot(repoRoot: string): string {
+  return join(storeRoot(repoRoot), "reports");
+}
+export function reportDir(repoRoot: string, timestamp: string): string {
+  return join(reportsRoot(repoRoot), timestamp);
+}
+export async function writeReport(repoRoot: string, timestamp: string, html: string, json: string): Promise<string> {
+  const dir = reportDir(repoRoot, timestamp);
+  await fsMkdir(dir, { recursive: true });
+  await fsWriteFile(join(dir, "guignet-report.html"), html, "utf-8");
+  await fsWriteFile(join(dir, "guignet-report.json"), json, "utf-8");
+  return dir;
 }

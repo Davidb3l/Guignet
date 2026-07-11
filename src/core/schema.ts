@@ -228,6 +228,12 @@ export const AttemptSchema = z.object({
 });
 export type Attempt = z.infer<typeof AttemptSchema>;
 
+/** Which side of a model's training cutoff a task's date falls on (§7). The
+ * post-cutoff subset is the clean, headline number; "unknown" means the model
+ * isn't in the cutoff registry, so no split can be drawn. */
+export const CutoffEraSchema = z.enum(["pre", "post", "unknown"]);
+export type CutoffEra = z.infer<typeof CutoffEraSchema>;
+
 /** The scored verdict: `.../verdict.json` (§ score). */
 export const VerdictSchema = z.object({
   taskId: z.string(),
@@ -236,7 +242,11 @@ export const VerdictSchema = z.object({
   passed: z.boolean(),
   /** Solution diff size vs ground truth (bloat ratio); null if not computed. */
   bloatRatio: z.number().nonnegative().nullable(),
-  /** Regurgitation flag: high similarity to ground truth on a pre-cutoff task (§7). */
+  /** Token-level Jaccard similarity of solution vs ground-truth fix, 0..1 (§7). */
+  similarity: z.number().min(0).max(1).nullable(),
+  /** Regurgitation flag: high similarity to ground truth on a PRE-cutoff task (§7). */
   regurgitationFlag: z.boolean(),
+  /** Which side of the run model's training cutoff this task's date falls on. */
+  cutoffEra: CutoffEraSchema,
 });
 export type Verdict = z.infer<typeof VerdictSchema>;
