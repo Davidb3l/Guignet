@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Bun
+.bun/
+
+# The store lives in target repos, never in this source repo — but ignore it
+# defensively so a dogfood run at the repo root never commits benchmark state.
+.guignet/
+
+# Suite event spine (local telemetry, SUITE_CONTRACTS §2)
+.suite/
+
+# Private design / strategy / planning docs — kept on disk for local work, NEVER
+# committed to the public repo. Matches how the rest of the suite keeps its
+# strategy/PRD/roadmap in private siblings (Ametrite-strategy, *-private, etc.).
+/Guignet.md
+/ARCHITECTURE.md
+/PLAN.md
+/STATUS.md
+/SUITE_CONTRACTS.md
+/CLAUDE.md
+
+# Editor / OS
+.DS_Store
+*.log
