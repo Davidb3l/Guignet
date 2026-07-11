@@ -69,9 +69,9 @@ describe("guignet CLI", () => {
     expect(obj.ok).toBe(false);
   });
 
-  test("still-unimplemented stages (run/score/report) → exit 1 with a clear message", async () => {
+  test("still-unimplemented stages (score/report) → exit 1 with a clear message", async () => {
     const repo = await tmp();
-    for (const cmd of ["run", "score", "report"]) {
+    for (const cmd of ["score", "report"]) {
       const r = await guignet([cmd], repo);
       expect(r.code).toBe(1);
       expect(r.stderr).toContain("not implemented");
@@ -86,5 +86,12 @@ describe("guignet CLI", () => {
       expect(r.stderr.toLowerCase()).toContain("config");
       expect(r.stderr).not.toContain("not implemented");
     }
+  });
+
+  test("run with no --config is a usage error (exit 2)", async () => {
+    const repo = await tmp();
+    const r = await guignet(["run"], repo);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("--config");
   });
 });

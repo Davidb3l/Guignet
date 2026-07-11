@@ -206,3 +206,16 @@ export function worktreeRemove(repoRoot: string, dest: string): Promise<GitResul
 export function applyDiff(worktreeDir: string, diffText: string): Promise<GitResult> {
   return gitStdin(["apply", "--whitespace=nowarn"], worktreeDir, diffText);
 }
+
+/**
+ * Capture everything an agent changed in a worktree as one unified diff vs the
+ * checked-out base — modifications, additions, AND deletions. `git add -A` first
+ * so brand-new files (untracked) appear in the diff, which a plain `git diff`
+ * would miss; then diff the index against HEAD (the base commit). Non-mutating
+ * to the real checkout — this only ever runs inside a disposable worktree.
+ */
+export async function captureWorktreeDiff(worktreeDir: string): Promise<string> {
+  await git(["add", "-A"], worktreeDir);
+  const r = await git(["diff", "--cached", "HEAD"], worktreeDir);
+  return r.ok ? r.stdout : "";
+}

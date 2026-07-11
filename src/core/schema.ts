@@ -181,23 +181,48 @@ export const SuiteSchema = z.object({
 });
 export type Suite = z.infer<typeof SuiteSchema>;
 
+/** The harness driving an attempt (ARCHITECTURE.md §6). v0 ships exactly two. */
+export const AdapterNameSchema = z.enum(["claude-code", "generic-cli"]);
+export type AdapterName = z.infer<typeof AdapterNameSchema>;
+
 /** A run's configuration: `.guignet/runs/<runId>/config.json` (§ run). */
 export const RunConfigSchema = z.object({
   runId: z.string(),
-  model: z.string(),
-  adapter: z.enum(["claude-code", "generic-cli"]),
-  /** Attempts per task per config. Default 3; 1 is watermarked in the report. */
-  nAttempts: z.number().int().positive(),
+  adapter: AdapterNameSchema,
+  /** Model id — adapter-specific (claude-code passes it to `--model`). Optional
+   * so an adapter can use its own default. */
+  model: z.string().optional(),
+  /** Attempts per task per config. Default 3; n=1 is watermarked "anecdote, not
+   * measurement" in the report (statistical honesty is a wedge — §9). */
+  nAttempts: z.number().int().positive().default(3),
   budgets: ConfigSchema.shape.budgets,
+  /** Bounded worktree-pool concurrency. Default min(4, cores/2) resolved in run. */
+  maxConcurrency: z.number().int().positive().optional(),
+  /** generic-cli only: the command template. `{prompt}` and `{worktree}` are
+   * substituted before it runs (the escape hatch that makes Guignet
+   * harness-neutral, §6). Required when adapter is "generic-cli". */
+  genericCli: z.object({ cmd: z.string().min(1) }).optional(),
 });
 export type RunConfig = z.infer<typeof RunConfigSchema>;
+
+/** Token accounting for one attempt, parsed from the harness's own transcript
+ * (never self-reported, §5). Cache tokens are split out — they're a large,
+ * cheaper slice of real cost that the report needs to show honestly. */
+export const TokenUsageSchema = z.object({
+  input: z.number().int().nonnegative(),
+  output: z.number().int().nonnegative(),
+  cacheRead: z.number().int().nonnegative().default(0),
+  cacheCreation: z.number().int().nonnegative().default(0),
+});
+export type TokenUsage = z.infer<typeof TokenUsageSchema>;
 
 /** Per-attempt result: `.guignet/runs/<runId>/attempts/<taskId>/<n>/attempt.json`. */
 export const AttemptSchema = z.object({
   taskId: z.string(),
   attempt: z.number().int().positive(),
   wallclockMs: z.number().nonnegative(),
-  tokens: z.object({ input: z.number().int().nonnegative(), output: z.number().int().nonnegative() }),
+  /** Null when the adapter has no parseable transcript (e.g. generic-cli). */
+  tokens: TokenUsageSchema.nullable(),
   dollars: z.number().nonnegative().nullable(),
   exit: z.enum(["completed", "budget-exhausted", "crashed"]),
 });

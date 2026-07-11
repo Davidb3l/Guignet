@@ -17,15 +17,22 @@ import { dirname, join } from "node:path";
 
 import type { z } from "zod";
 
+import { existsSync as fsExistsSync } from "node:fs";
+import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
+
 import {
+  AttemptSchema,
   CandidateLogSchema,
   ConfigSchema,
   GateSchema,
+  RunConfigSchema,
   SuiteSchema,
   TaskSchema,
+  type Attempt,
   type CandidateLog,
   type Config,
   type Gate,
+  type RunConfig,
   type Suite,
   type Task,
 } from "./schema.ts";
@@ -147,4 +154,58 @@ export function readCandidateLog(repoRoot: string): Promise<CandidateLog> {
 
 export function writeCandidateLog(repoRoot: string, log: CandidateLog): Promise<void> {
   return writeJson(candidatesPath(repoRoot), CandidateLogSchema, log);
+}
+
+// --- runs (§3): runs/<runId>/config.json + attempts/<taskId>/<n>/… ---
+
+export function runDir(repoRoot: string, runId: string): string {
+  return join(storeRoot(repoRoot), "runs", runId);
+}
+
+export function runConfigPath(repoRoot: string, runId: string): string {
+  return join(runDir(repoRoot, runId), "config.json");
+}
+
+/** The dir for one attempt: `runs/<runId>/attempts/<taskId>/<n>/`. */
+export function attemptDir(repoRoot: string, runId: string, taskId: string, attempt: number): string {
+  return join(runDir(repoRoot, runId), "attempts", taskId, String(attempt));
+}
+
+/** The raw session record dir for an attempt (adapters write their transcript here). */
+export function transcriptDir(repoRoot: string, runId: string, taskId: string, attempt: number): string {
+  return join(attemptDir(repoRoot, runId, taskId, attempt), "transcript");
+}
+
+export function readRunConfig(repoRoot: string, runId: string): Promise<RunConfig> {
+  return readJson(runConfigPath(repoRoot, runId), RunConfigSchema);
+}
+
+export function writeRunConfig(repoRoot: string, config: RunConfig): Promise<void> {
+  return writeJson(runConfigPath(repoRoot, config.runId), RunConfigSchema, config);
+}
+
+export function readAttempt(repoRoot: string, runId: string, taskId: string, attempt: number): Promise<Attempt> {
+  return readJson(join(attemptDir(repoRoot, runId, taskId, attempt), "attempt.json"), AttemptSchema);
+}
+
+export function writeAttempt(repoRoot: string, runId: string, att: Attempt): Promise<void> {
+  return writeJson(join(attemptDir(repoRoot, runId, att.taskId, att.attempt), "attempt.json"), AttemptSchema, att);
+}
+
+/** Has this attempt already completed? (Resume: skip attempts with an attempt.json.) */
+export function attemptExists(repoRoot: string, runId: string, taskId: string, attempt: number): boolean {
+  return fsExistsSync(join(attemptDir(repoRoot, runId, taskId, attempt), "attempt.json"));
+}
+
+/** Write the agent's produced diff for an attempt (`solution.diff`). */
+export async function writeSolutionDiff(
+  repoRoot: string,
+  runId: string,
+  taskId: string,
+  attempt: number,
+  diff: string,
+): Promise<void> {
+  const dir = attemptDir(repoRoot, runId, taskId, attempt);
+  await fsMkdir(dir, { recursive: true });
+  await fsWriteFile(join(dir, "solution.diff"), diff, "utf-8");
 }
