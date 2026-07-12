@@ -7,6 +7,9 @@
  */
 import {
   EXIT,
+  emitEvent,
+  readConfig,
+  uri,
   writeReport,
   type ExitCode,
   type StageRun,
@@ -32,7 +35,18 @@ export async function runReport(opts: { repoRoot: string; json: boolean }): Prom
 
   const jsonTwin = JSON.stringify(model, null, 2);
   const html = renderReportHtml(model);
-  const dir = await writeReport(repoRoot, stampFor(generatedAt), html, jsonTwin);
+  const stamp = stampFor(generatedAt);
+  const dir = await writeReport(repoRoot, stamp, html, jsonTwin);
+
+  // Suite event spine (§13) — a report was generated. Config-gated + best-effort;
+  // the spine setting is a no-op unless the repo opts in. Read separately so a
+  // missing config can't stop the report itself from having been written.
+  try {
+    const spine = (await readConfig(repoRoot)).spine;
+    await emitEvent(spine, repoRoot, "report.generated", [uri.report(stamp)], { path: `${dir}/guignet-report.html` });
+  } catch {
+    /* no config / unreadable — skip emission, report is already written */
+  }
 
   // Nothing to show yet is a soft block, not an error — but we still wrote the
   // (empty) report + twin so the paths exist.

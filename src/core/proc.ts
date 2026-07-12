@@ -165,7 +165,11 @@ export async function runShell(cmd: string, opts: ShellOptions): Promise<ShellRe
   if (opts.timeoutMs !== undefined) {
     timer = setTimeout(() => {
       timedOut = true;
-      proc.kill(9);
+      // Kill the whole tree, not just the `sh` child: a test runner (vitest,
+      // jest) spawns worker processes that would otherwise ORPHAN on a timeout
+      // and pile up across a long gate/score run, loading the machine. Same
+      // reasoning as spawnToFile. Best-effort.
+      void killTree(proc.pid);
     }, opts.timeoutMs);
   }
 

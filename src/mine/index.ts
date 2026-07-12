@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import {
   EXIT,
   changedFiles,
+  emitEvent,
   fileDiff,
   listCommits,
   numstat,
@@ -158,6 +159,10 @@ export async function runMine(opts: { repoRoot: string; json: boolean; force: bo
   }
 
   await writeCandidateLog(repoRoot, { minedAt: new Date().toISOString(), candidates });
+
+  // Suite event spine (§13) — config-gated + best-effort; a no-op unless the
+  // target repo opts in (default "auto" emits only when .suite/ already exists).
+  await emitEvent(config.spine, repoRoot, "suite.mined", [], { candidates: result.discovered });
 
   const code: ExitCode = result.reconstructed > 0 ? EXIT.OK : EXIT.SOFT_BLOCKED;
   if (json) return { stdout: JSON.stringify(result) + "\n", stderr: "", code };

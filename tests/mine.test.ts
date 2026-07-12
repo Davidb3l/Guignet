@@ -170,6 +170,36 @@ describe("runMine end-to-end", () => {
     expect(truth.verifierDiff).toContain("tests/calc.test.ts");
   });
 
+  test("emits a conformant suite.mined event to the spine when enabled (§13)", async () => {
+    const repo = await initRepo();
+    await commit(repo, { "src/c.ts": "export const y = () => 0;\n" }, "seed");
+    await commit(repo, { "src/c.ts": "export const y = () => 1;\n", "tests/c.test.ts": "test('y',()=>{});\n" }, "fix: y");
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test", spine: "on" }));
+
+    await runMine({ repoRoot: repo, json: true, force: false });
+
+    const { readdir, readFile } = await import("node:fs/promises");
+    const eventsDir = join(repo, ".suite", "events");
+    const files = await readdir(eventsDir);
+    expect(files.length).toBe(1);
+    const line = (await readFile(join(eventsDir, files[0]!), "utf-8")).trim();
+    const ev = JSON.parse(line);
+    expect(ev.source).toBe("guignet");
+    expect(ev.type).toBe("suite.mined");
+    expect(typeof ev.data.candidates).toBe("number");
+    expect(ev.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  test("does NOT create .suite/ under default (auto) visibility", async () => {
+    const repo = await initRepo();
+    await commit(repo, { "src/c.ts": "export const y = () => 0;\n" }, "seed");
+    await commit(repo, { "src/c.ts": "export const y = () => 1;\n", "tests/c.test.ts": "test('y',()=>{});\n" }, "fix: y");
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test" })); // spine defaults to "auto"
+    await runMine({ repoRoot: repo, json: true, force: false });
+    const { readdir } = await import("node:fs/promises");
+    await expect(readdir(join(repo, ".suite"))).rejects.toBeTruthy(); // never introduced
+  });
+
   test("discards a source-only commit with a clear reason", async () => {
     const repo = await initRepo();
     await commit(repo, { "src/a.ts": "export const x = 1;\n" }, "seed");

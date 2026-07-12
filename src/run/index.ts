@@ -17,12 +17,15 @@ import {
   EXIT,
   RunConfigSchema,
   attemptExists,
+  emitEvent,
   readConfig,
   readSuite,
   readTask,
+  uri,
   writeRunConfig,
   type ExitCode,
   type RunConfig,
+  type SpineSetting,
   type StageRun,
   type Task,
 } from "../core/index.ts";
@@ -69,9 +72,11 @@ export async function runRun(opts: {
   // The target-repo config gives the agent's environment: the package root (its
   // cwd), how to install deps, and the install timeout (reuse the verifier one).
   let env: AttemptEnv;
+  let spine: SpineSetting;
   try {
     const cfg = await readConfig(repoRoot);
     env = { subdir: cfg.subdir, setupCmd: cfg.setupCmd, setupTimeoutMs: cfg.verifierTimeoutMs };
+    spine = cfg.spine;
   } catch (err) {
     return fail(json, `cannot read target config: ${(err as Error).message}`, EXIT.FAILURE);
   }
@@ -140,6 +145,14 @@ export async function runRun(opts: {
     result.byExit[att.exit] = (result.byExit[att.exit] ?? 0) + 1;
     if (att.dollars !== null) result.dollars = (result.dollars ?? 0) + att.dollars;
   }
+
+  // Suite event spine (§13) — a run finished; solved/total is a scoring concept,
+  // so this carries just the run + model. Config-gated + best-effort.
+  await emitEvent(spine, repoRoot, "run.completed", [uri.run(runConfig.runId)], {
+    run: runConfig.runId,
+    model: runConfig.model ?? runConfig.adapter,
+    attempted: result.attempted,
+  });
 
   const code: ExitCode = EXIT.OK;
   if (json) return { stdout: JSON.stringify(result) + "\n", stderr: "", code };

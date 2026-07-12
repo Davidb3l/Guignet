@@ -14,11 +14,13 @@
  */
 import {
   EXIT,
+  emitEvent,
   listTaskIds,
   readCandidateLog,
   readConfig,
   readGate,
   readTask,
+  uri,
   writeGate,
   writeSuite,
   type Gate,
@@ -154,6 +156,18 @@ export async function runGate(opts: { repoRoot: string; json: boolean; force: bo
     soundnessRate: { admitted: admittedIds.length, candidates },
     minedAt: new Date().toISOString(),
   });
+
+  // Suite event spine (§13) — one task.admitted per admitted task, config-gated
+  // + best-effort. `kind` is read from the task record for the Hub's benefit.
+  for (const id of admittedIds) {
+    let kind = "unknown";
+    try {
+      kind = (await readTask(repoRoot, id)).taxonomy.kind;
+    } catch {
+      /* keep "unknown" */
+    }
+    await emitEvent(config.spine, repoRoot, "task.admitted", [uri.task(id)], { task: id, kind });
+  }
 
   // An empty suite is an expected, non-error "nothing actionable" outcome (§4).
   const code = admittedIds.length === 0 ? EXIT.SOFT_BLOCKED : EXIT.OK;
