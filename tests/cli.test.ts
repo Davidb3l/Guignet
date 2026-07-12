@@ -30,7 +30,44 @@ async function guignet(args: string[], cwd: string): Promise<Cli> {
   return { code: await proc.exited, stdout, stderr };
 }
 
+/** A git repo with `n` fix commits, each adding a source + test file (→ n tasks). */
+async function repoWithFixes(n: number): Promise<string> {
+  const repo = await tmp();
+  const sh = async (c: string): Promise<void> => {
+    const p = Bun.spawn(["sh", "-c", c], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    if ((await p.exited) !== 0) throw new Error(`${c}: ${await new Response(p.stderr).text()}`);
+  };
+  await sh("git init -q -b main && git config user.email t@t.co && git config user.name t && git config commit.gpgsign false");
+  await writeFile(join(repo, "seed.ts"), "export const v = 0;\n");
+  await sh("git add -A && git commit -qm seed");
+  for (let i = 1; i <= n; i++) {
+    await writeFile(join(repo, `mod${i}.ts`), `export const f${i} = () => ${i};\n`);
+    await writeFile(join(repo, `mod${i}.test.ts`), `test('f${i}', () => {});\n`);
+    await sh(`git add -A && git commit -qm "fix: change ${i}"`);
+  }
+  await mkdir(join(repo, ".guignet"), { recursive: true });
+  await writeFile(join(repo, ".guignet", "config.json"), '{"testCmd":"bun test"}');
+  return repo;
+}
+
 describe("guignet CLI", () => {
+  // Regression: the bin must DRAIN all I/O before exiting. A `.then(process.exit)`
+  // bin silently truncated both stdout and the store on a large repo (found via
+  // the hono dogfood — it died at ~29 of 459 tasks). A multi-task mine through
+  // the bin must emit complete JSON and write every task + the candidate log.
+  test("mine through the bin does not truncate output/store on many tasks", async () => {
+    const repo = await repoWithFixes(30);
+    const r = await guignet(["mine", "--json"], repo);
+    expect(r.code).toBe(0);
+    const summary = JSON.parse(r.stdout); // throws if stdout was truncated/empty
+    expect(summary.reconstructed).toBe(30);
+    // The store is complete: every task dir AND the candidate log were flushed.
+    const { readdir } = await import("node:fs/promises");
+    const taskCount = (await readdir(join(repo, ".guignet", "tasks"))).length;
+    expect(taskCount).toBe(30);
+    expect(await Bun.file(join(repo, ".guignet", "candidates.json")).exists()).toBe(true);
+  });
+
   test("no subcommand → exit 2, stdout empty (usage to stderr)", async () => {
     const r = await guignet([], await tmp());
     expect(r.code).toBe(2);
