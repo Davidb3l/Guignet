@@ -25,6 +25,7 @@
  * is re-running `setupCmd` per attempt; for the v0 dogfood corpus setup is a
  * cache-warm `bun install`. A future optimization can pool per task.
  */
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -130,9 +131,13 @@ export async function replayVerdict(
   // mkdtemp dir rather than at the mkdtemp dir itself.
   const tmp = await mkdtemp(join(tmpdir(), "guignet-score-"));
   const worktreeDir = join(tmp, "wt");
-  // Monorepo (§3): setup/verifier run with the package root as cwd; reset/clean/
-  // apply always act on the worktree root (git has no partial worktrees).
+  // Monorepo (§3): the package root; reset/clean/apply always act on the
+  // worktree root (git has no partial worktrees).
   const worktreeSubdir = config.subdir ? join(worktreeDir, config.subdir) : worktreeDir;
+  // Where setup + verifier RUN — the package root, or the worktree root for a
+  // workspace test runner (config.testCwd "repo"). MUST match gate/replay.ts, or
+  // score would judge with a different verifier cwd than the gate validated.
+  const execCwd = config.testCwd === "repo" ? worktreeDir : worktreeSubdir;
 
   try {
     const add = await worktreeAdd(repoRoot, task.baseSha, worktreeDir);
@@ -140,11 +145,19 @@ export async function replayVerdict(
       return { verdict: verdict(false), note: `could not create worktree at ${task.baseSha}: ${snippet(add.stderr)}` };
     }
 
+    // Mirror the gate/run guard: if the mined `subdir` is absent at this base
+    // (a target-repo history rewrite between gate and score), bail with a clear
+    // note instead of spawning setup/verifier into a non-existent cwd (the
+    // cryptic "posix_spawn 'sh' ENOENT"). Un-scoreable ⇒ passed:false (fail-safe).
+    if (config.subdir && !existsSync(worktreeSubdir)) {
+      return { verdict: verdict(false), note: `subdir '${config.subdir}' does not exist at base commit ${task.baseSha.slice(0, 10)}` };
+    }
+
     // Setup once — the worktree didn't inherit the repo's node_modules. Setup
     // failing means we can't stand the environment up to judge the solution, so
     // the attempt is un-scoreable ⇒ passed:false (fail-safe direction).
     if (config.setupCmd) {
-      const setup = await runShell(config.setupCmd, { cwd: worktreeSubdir, timeoutMs });
+      const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs });
       if (setup.timedOut) return { verdict: verdict(false), note: "setup timed out" };
       if (setup.code !== 0) return { verdict: verdict(false), note: `setup failed: ${snippet(setup.stderr || setup.stdout)}` };
     }
@@ -171,7 +184,7 @@ export async function replayVerdict(
     // The primary verdict: run the held-out verifier. Pass iff it exits 0 within
     // the timeout. A timeout or a null exit (killed/crashed — an environment
     // problem, not a passing test) is NOT a pass.
-    const r = await runShell(task.verifierCmd, { cwd: worktreeSubdir, timeoutMs });
+    const r = await runShell(task.verifierCmd, { cwd: execCwd, timeoutMs });
     if (r.timedOut) return { verdict: verdict(false), note: "verifier timed out" };
     if (r.code === null) return { verdict: verdict(false), note: "verifier could not run (killed/crashed)" };
     const passed = r.code === 0;

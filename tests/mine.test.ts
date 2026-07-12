@@ -215,6 +215,34 @@ describe("runMine end-to-end", () => {
     expect(discarded?.discardReason).toContain("no test files");
   });
 
+  test("testCwd 'repo' keeps verifier paths repo-root-relative; default strips the subdir", async () => {
+    // A monorepo package under pkg/. Under the default (subdir) testCwd the
+    // verifier runs inside pkg/, so its path is stripped to the package root;
+    // under testCwd:"repo" it runs at the repo root, so the path keeps the pkg/
+    // prefix (the shape a workspace runner needs — see gate/replay.ts execCwd).
+    const repo = await initRepo();
+    await commit(repo, { "pkg/src/calc.ts": "export const add = (a,b) => a - b;\n" }, "seed: buggy calc");
+    await commit(
+      repo,
+      { "pkg/src/calc.ts": "export const add = (a,b) => a + b;\n", "pkg/tests/calc.test.ts": "test('adds',()=>{});\n" },
+      "fix: add() should add",
+    );
+
+    // Default testCwd (subdir): path stripped to the package root.
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test", subdir: "pkg" }));
+    let run = await runMine({ repoRoot: repo, json: true, force: true });
+    expect(run.code).toBe(0);
+    let task = await readTask(repo, (await listTaskIds(repo))[0]!);
+    expect(task.verifierCmd).toBe("bun test 'tests/calc.test.ts'");
+
+    // testCwd "repo": path stays repo-root-relative (keeps the pkg/ prefix).
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test", subdir: "pkg", testCwd: "repo" }));
+    run = await runMine({ repoRoot: repo, json: true, force: true });
+    expect(run.code).toBe(0);
+    task = await readTask(repo, (await listTaskIds(repo))[0]!);
+    expect(task.verifierCmd).toBe("bun test 'pkg/tests/calc.test.ts'");
+  });
+
   test("resume: a second run without --force reconstructs nothing new", async () => {
     const repo = await initRepo();
     await commit(repo, { "src/c.ts": "export const y = () => 0;\n" }, "seed");

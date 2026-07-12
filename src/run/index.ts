@@ -75,7 +75,7 @@ export async function runRun(opts: {
   let spine: SpineSetting;
   try {
     const cfg = await readConfig(repoRoot);
-    env = { subdir: cfg.subdir, setupCmd: cfg.setupCmd, setupTimeoutMs: cfg.verifierTimeoutMs };
+    env = { subdir: cfg.subdir, setupCmd: cfg.setupCmd, setupTimeoutMs: cfg.verifierTimeoutMs, testCwd: cfg.testCwd };
     spine = cfg.spine;
   } catch (err) {
     return fail(json, `cannot read target config: ${(err as Error).message}`, EXIT.FAILURE);

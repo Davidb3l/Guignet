@@ -103,6 +103,10 @@ async function reconstruct(
   if (existsSync(taskDir(repoRoot, id)) && !force) return { taskId: id };
 
   const sourceStats = await numstat(repoRoot, parent, commit.sha, sourcePaths);
+  // The verifier's cwd is the repo root under testCwd "repo" (workspace runners),
+  // so its paths must stay repo-root-relative — only strip the subdir prefix when
+  // the verifier actually runs WITH subdir as cwd (the default).
+  const stripDir = config.testCwd === "repo" ? undefined : subdir;
   const task: Task = {
     id,
     prompt: reconstructPrompt(buildPromptContext(commit)),
@@ -110,7 +114,7 @@ async function reconstruct(
     sourceSha: commit.sha,
     date: commit.isoDate,
     taxonomy: buildTaxonomy(commit.subject, sourcePaths, sourceStats, subdir),
-    verifierCmd: buildVerifierCmd(config.testCmd, testPaths, subdir),
+    verifierCmd: buildVerifierCmd(config.testCmd, testPaths, stripDir),
     discoveredBy,
   };
   await writeTask(repoRoot, task);

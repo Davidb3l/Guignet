@@ -51,6 +51,23 @@ export const ConfigSchema = z.object({
    * worktree. Relative to the repo root; omitted means the repo root itself.
    */
   subdir: z.string().optional(),
+  /**
+   * WHERE setup + verifier (and the agent) execute, relative to the worktree
+   * (ARCHITECTURE.md §3). Independent of `subdir`, which only scopes MINING.
+   * - "subdir" (default): run with `subdir` as cwd — right for a self-contained
+   *   package whose test runner works from its own directory.
+   * - "repo": run at the worktree ROOT even though mining stays scoped to
+   *   `subdir`. This is the shape a WORKSPACE test runner needs — vitest
+   *   `projects`, pnpm/nx/turbo workspaces — where a scoped run must execute at
+   *   the workspace root or the runner can't resolve its project graph (a run
+   *   from inside the package fails with "no projects/tests found"). When "repo",
+   *   mined verifier paths stay repo-root-relative instead of being stripped to
+   *   `subdir`.
+   * Has no effect without `subdir` (repo root is already the cwd). Changing it
+   * (or `subdir`) on an already-mined repo needs `guignet mine --force` — the
+   * verifier path shape is baked into each task at mine time.
+   */
+  testCwd: z.enum(["subdir", "repo"]).default("subdir"),
   /** Per-attempt default budgets (a run config may tighten these). */
   budgets: z
     .object({

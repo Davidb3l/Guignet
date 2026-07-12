@@ -13,6 +13,7 @@
  * and strips everything else — tracked edits, diff-added files, and gitignored
  * test artifacts alike — so no stale state leaks between replays.
  */
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,9 +81,14 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
   // mkdtemp dir rather than at the mkdtemp dir itself.
   const tmp = await mkdtemp(join(tmpdir(), "guignet-gate-"));
   const worktreeDir = join(tmp, "wt");
-  // Monorepo (§3): setup/verifier run with the package root as cwd; reset/clean/
-  // apply always act on the worktree root (git has no partial worktrees).
+  // Monorepo (§3): the package root inside the worktree — where the base must
+  // contain the subdir for the task to be replayable. reset/clean/apply always
+  // act on the worktree root (git has no partial worktrees).
   const worktreeSubdir = config.subdir ? join(worktreeDir, config.subdir) : worktreeDir;
+  // Where setup + verifier actually RUN. Usually the package root, but a
+  // workspace test runner (vitest projects, pnpm/nx) must run at the worktree
+  // ROOT even though mining stayed scoped to the subdir (config.testCwd "repo").
+  const execCwd = config.testCwd === "repo" ? worktreeDir : worktreeSubdir;
 
   const verdict = (
     admitted: boolean,
@@ -97,9 +103,20 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
       return verdict(false, 0, 0, `could not create worktree at ${task.baseSha}: ${snippet(add.stderr)}`);
     }
 
+    // A monorepo `subdir` names the package root, but the task's BASE commit can
+    // predate that directory (e.g. the very commit that introduced the package,
+    // or a repo restructure). Running setup/verifier with a non-existent cwd
+    // fails deep in the spawn layer with a cryptic "posix_spawn 'sh' ENOENT" that
+    // looks like a broken machine, not a task-validity fact. Detect it here and
+    // discard with a clear, honest reason (fail-safe: such a task cannot be set
+    // up at base, so it was never admissible).
+    if (config.subdir && !existsSync(worktreeSubdir)) {
+      return verdict(false, 0, 0, `subdir '${config.subdir}' does not exist at base commit ${task.baseSha.slice(0, 10)}`);
+    }
+
     // Setup once — the worktree didn't inherit the repo's node_modules.
     if (config.setupCmd) {
-      const setup = await runShell(config.setupCmd, { cwd: worktreeSubdir, timeoutMs });
+      const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs });
       if (setup.timedOut) return verdict(false, 0, 0, "setup timed out");
       if (setup.code !== 0) return verdict(false, 0, 0, `setup failed: ${snippet(setup.stderr || setup.stdout)}`);
     }
@@ -111,7 +128,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
       await resetWorktree(worktreeDir);
       const applied = await applyDiff(worktreeDir, truth.verifierDiff);
       if (!applied.ok) return verdict(false, failAtBase, 0, `git apply failed for verifier diff: ${snippet(applied.stderr)}`);
-      const r = await runShell(verifierCmd, { cwd: worktreeSubdir, timeoutMs });
+      const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs });
       if (r.timedOut) return verdict(false, failAtBase, 0, "verifier timed out at base");
       // A null exit code means the process was killed/crashed by signal (OOM,
       // spawn failure) — an ENVIRONMENT problem, NOT the held-out test detecting
@@ -132,7 +149,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
       if (!v.ok) return verdict(false, failAtBase, passAtFix, `git apply failed for verifier diff: ${snippet(v.stderr)}`);
       const f = await applyDiff(worktreeDir, truth.fixDiff);
       if (!f.ok) return verdict(false, failAtBase, passAtFix, `git apply failed for fix diff: ${snippet(f.stderr)}`);
-      const r = await runShell(verifierCmd, { cwd: worktreeSubdir, timeoutMs });
+      const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs });
       if (r.timedOut) return verdict(false, failAtBase, passAtFix, "verifier timed out at fix");
       if (r.code === null) return verdict(false, failAtBase, passAtFix, "verifier could not run at fix (killed/crashed)");
       if (r.code === 0) passAtFix++;

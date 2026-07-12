@@ -279,6 +279,76 @@ describe("gate replay", () => {
     expect((await readSuite(s.repo)).soundnessRate).toEqual({ admitted: 1, candidates: 4 });
   });
 
+  test("(l) a task whose base commit lacks the configured subdir is discarded with a clear reason", async () => {
+    const s = await scaffold();
+    // The scaffold's base commit has files at the repo root but no `pkg/` dir —
+    // it predates the (fictional) package root, exactly like a task mined across
+    // a monorepo restructure. Setup/verifier would otherwise be spawned with a
+    // non-existent cwd and fail cryptically ("posix_spawn 'sh' ENOENT"). The
+    // gate must instead discard with an honest, subdir-naming reason.
+    await writeConfig(s.repo, ConfigSchema.parse({ testCmd: "bun run verifyA.ts", subdir: "pkg", setupCmd: "echo should-not-run" }));
+    await writeTask(s.repo, makeTask("no-subdir-at-base", s.base, "bun run verifyA.ts"));
+    await writeTruth(s.repo, "no-subdir-at-base", { fixDiff: s.fixGood, verifierDiff: s.verifierA });
+
+    const run = await runGate({ repoRoot: s.repo, json: false, force: false });
+    expect(run.code).toBe(3); // soft-blocked: zero admitted
+    const gate = await readGate(s.repo, "no-subdir-at-base");
+    expect(gate.admitted).toBe(false);
+    expect(gate.discardReason).toContain("subdir 'pkg' does not exist at base commit");
+    // The guard fires before setup — no cryptic spawn error leaks through.
+    expect(gate.discardReason).not.toContain("posix_spawn");
+    expect(gate.replays).toEqual({ failAtBase: 0, passAtFix: 0, k: 2 });
+  });
+
+  test("(m) testCwd 'repo' runs setup + verifier at the worktree root, not the subdir", async () => {
+    // Model a workspace test runner that ONLY works from the repo root: the
+    // verifier is a script that asserts its cwd is the worktree root (a
+    // root-only marker file exists) and then checks the fix. Under the default
+    // testCwd it would run inside `pkg/` and fail (fail-safe discard); under
+    // testCwd:"repo" it runs at the root and the sound task is admitted.
+    const s = await scaffold();
+    // Put the real fix source + verifier UNDER pkg/ (so subdir mining is honest)
+    // but make the verifier reach up and assert a repo-root-only condition.
+    await Bun.write(join(s.repo, "root.marker"), "workspace-root\n");
+    const rootOnlyVerifier =
+      `import { existsSync } from "node:fs";\n` +
+      `import { f } from "./a.ts";\n` + // sibling of this test file inside pkg/
+      // "root.marker" is resolved against CWD: present only when the verifier
+      // runs at the worktree ROOT (testCwd:"repo"), absent from inside pkg/.
+      `if (!existsSync("root.marker")) { console.error("not at repo root"); process.exit(2); }\n` +
+      `if (f(2, 3) !== 5) process.exit(1);\n`;
+    // Build the pkg/ tree in a fresh commit on top of the scaffold base.
+    await Bun.write(join(s.repo, "pkg", "a.ts"), "export const f = (a: number, b: number) => a - b;\n");
+    await commit(s.repo, "add pkg with buggy a.ts");
+    const pkgBase = await head(s.repo);
+    await Bun.write(join(s.repo, "pkg", "a.ts"), "export const f = (a: number, b: number) => a + b;\n");
+    await Bun.write(join(s.repo, "pkg", "wtroot.test.ts"), rootOnlyVerifier);
+    await commit(s.repo, "fix pkg/a.ts + root-only verifier");
+    const pkgFix = await head(s.repo);
+    const d = async (path: string): Promise<string> => (await git(["diff", pkgBase, pkgFix, "--", path], s.repo)).stdout;
+
+    // Verifier command is repo-root-relative (testCwd:"repo" ⇒ no subdir strip).
+    await writeConfig(s.repo, ConfigSchema.parse({ testCmd: "bun run pkg/wtroot.test.ts", subdir: "pkg", testCwd: "repo" }));
+    await writeTask(s.repo, makeTask("root-cwd", pkgBase, "bun run pkg/wtroot.test.ts"));
+    await writeTruth(s.repo, "root-cwd", { fixDiff: await d("pkg/a.ts"), verifierDiff: await d("pkg/wtroot.test.ts") });
+
+    const run = await runGate({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    expect(JSON.parse(run.stdout).admitted).toBe(1);
+    const gate = await readGate(s.repo, "root-cwd");
+    expect(gate.admitted).toBe(true);
+    expect(gate.replays).toEqual({ failAtBase: 2, passAtFix: 2, k: 2 });
+
+    // Control: the SAME repo-root-relative verifier under the default (subdir)
+    // testCwd runs with cwd=pkg/, where `pkg/wtroot.test.ts` resolves to the
+    // non-existent pkg/pkg/wtroot.test.ts ⇒ the verifier can't run ⇒ conservative
+    // discard. (Either the missing file or, were it found, the absent root marker
+    // would fail it — both trace to the wrong cwd.) Proves testCwd flips admission.
+    await writeConfig(s.repo, ConfigSchema.parse({ testCmd: "bun run pkg/wtroot.test.ts", subdir: "pkg" }));
+    const run2 = await runGate({ repoRoot: s.repo, json: true, force: true });
+    expect(JSON.parse(run2.stdout).admitted).toBe(0);
+  });
+
   test("(j) under --json, stdout is exactly one JSON object (logs go to stderr)", async () => {
     const s = await scaffold();
     await writeConfigDefault(s.repo);

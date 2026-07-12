@@ -6,6 +6,7 @@
  * The runner never pushes and never touches the real checkout — all work is in
  * throwaway worktrees.
  */
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,6 +31,10 @@ export interface AttemptEnv {
   subdir?: string;
   setupCmd?: string;
   setupTimeoutMs: number;
+  /** Where setup + the agent run (ARCHITECTURE.md §3). "repo" runs them at the
+   * worktree root even with a `subdir` set — for workspace test runners that
+   * must execute at the root. Defaults to "subdir" when unset. */
+  testCwd?: "subdir" | "repo";
 }
 
 /** Milliseconds elapsed, measured by the runner (never trusting the adapter). */
@@ -57,6 +62,10 @@ export async function runOneAttempt(
   const tmp = await mkdtemp(join(tmpdir(), "guignet-run-"));
   const worktreeDir = join(tmp, "wt");
   const worktreeSubdir = env.subdir ? join(worktreeDir, env.subdir) : worktreeDir;
+  // Where setup + the agent run: the package root by default, or the worktree
+  // root for workspace runners (config.testCwd "repo"). The diff is always
+  // captured at the worktree root regardless.
+  const execCwd = env.testCwd === "repo" ? worktreeDir : worktreeSubdir;
 
   const record = async (
     exit: Attempt["exit"],
@@ -78,13 +87,22 @@ export async function runOneAttempt(
       return await record("crashed", "", null, null, 0);
     }
 
+    // Defensive: a monorepo `subdir` may not exist at this task's base commit
+    // (it predates the package root). Gate discards such tasks, so an admitted
+    // suite never carries one — but a stale suite could. Record a clean crash
+    // rather than spawning setup/agent into a non-existent cwd (a cryptic
+    // "posix_spawn 'sh' ENOENT"). Mirrors the gate/replay.ts guard.
+    if (env.subdir && !existsSync(worktreeSubdir)) {
+      return await record("crashed", "", null, null, 0);
+    }
+
     // Give the agent the environment a developer starts from — deps installed —
     // so it can resolve imports and run tests. Best-effort: if setup fails, we
     // proceed with a bare worktree (the agent may still fix by reasoning; score
     // verifies either way). Setup is env prep, NOT agent work, so it runs BEFORE
     // the wall-clock starts and its time never counts against the agent.
     if (env.setupCmd) {
-      await runShell(env.setupCmd, { cwd: worktreeSubdir, timeoutMs: env.setupTimeoutMs });
+      await runShell(env.setupCmd, { cwd: execCwd, timeoutMs: env.setupTimeoutMs });
       // Baseline EVERYTHING setup did — modified tracked files (lockfiles) AND
       // untracked artifacts it wrote (a gitignored-elsewhere lockfile, codegen) —
       // into a throwaway commit, so the captured solution diff is the agent's
@@ -104,9 +122,10 @@ export async function runOneAttempt(
     const agentStart = nowMs();
     const { exit } = await adapter.attempt({
       prompt: task.prompt,
-      // The agent's cwd is the monorepo package root (§3) when a subdir is set;
-      // the diff is still captured at the worktree root, where git lives.
-      worktreePath: worktreeSubdir,
+      // The agent's cwd is the monorepo package root (§3) by default, or the
+      // worktree root under testCwd "repo"; the diff is still captured at the
+      // worktree root, where git lives.
+      worktreePath: execCwd,
       transcriptDir: tDir,
       model: runConfig.model,
       budget: runConfig.budgets ?? {},
