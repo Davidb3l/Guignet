@@ -161,7 +161,7 @@ describe("template — self-contained offline invariant (§1, §8)", () => {
     expect(html).toContain("The Referee's Report");
     expect(html).toContain("$ per solved task");
     expect(html).toContain("Leaderboard");
-    expect(html).toContain("Contamination split");
+    expect(html).toContain("Cutoff split"); // default visibility is "unknown" → informational framing
     expect(html).toContain("Taxonomy heatmap");
     expect(html).toContain("suite soundness");
     expect(html).toContain("Methodology");
@@ -177,10 +177,39 @@ describe("template — self-contained offline invariant (§1, §8)", () => {
     expect(html.toLowerCase()).not.toContain("fonts.google");
   });
 
+  test("cutoff-split framing is provenance-aware (contamination vs freshness)", async () => {
+    const base = await tmp();
+    await seedRun(base);
+
+    // public → contamination framing ("clean" / "possibly seen"), pre grayed.
+    await writeConfig(base, ConfigSchema.parse({ testCmd: "bun test", repoVisibility: "public" }));
+    const pub = renderReportHtml(await aggregate(base, "2026-07-11T12:00:00Z"));
+    expect(pub).toContain("Contamination split");
+    expect(pub).toContain("possibly seen");
+    expect(pub).toContain("split-pre split-pre-gray"); // pre column grayed (class applied)
+    expect(pub).toContain("suggestive, not dispositive");
+
+    // private → knowledge-freshness framing, NO contamination claim, pre NOT grayed.
+    await writeConfig(base, ConfigSchema.parse({ testCmd: "bun test", repoVisibility: "private" }));
+    const priv = renderReportHtml(await aggregate(base, "2026-07-11T12:00:00Z"));
+    expect(priv).toContain("knowledge freshness");
+    expect(priv).not.toContain("possibly seen");
+    expect(priv).not.toContain("split-pre split-pre-gray"); // gray class NOT applied
+    expect(priv).toContain("memorization-contamination risk is low");
+
+    // unknown (default) → neutral, prompts to set visibility, no contamination claim.
+    await writeConfig(base, ConfigSchema.parse({ testCmd: "bun test" }));
+    const unk = renderReportHtml(await aggregate(base, "2026-07-11T12:00:00Z"));
+    expect(unk).toContain("informational");
+    expect(unk).toContain("repoVisibility");
+    expect(unk).not.toContain("possibly seen");
+  });
+
   test("escapes model-derived strings", () => {
     const model: ReportModel = {
       generatedAt: "2026-07-11T12:00:00Z",
       repoName: "<script>evil</script>",
+      repoVisibility: "unknown",
       suite: { admitted: 1, candidates: 2, soundnessRate: 0.5, minedAt: "2026-07-01T00:00:00Z" },
       configs: [], taxonomy: { forLabel: null, kinds: [], areas: [], cells: [], areasOmitted: 0 },
       methodology: { gateReplays: 2, cutoffRegistryVersion: "v", adapters: [], totalRuns: 0, totalAttempts: 0 },

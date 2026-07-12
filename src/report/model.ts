@@ -75,6 +75,9 @@ export interface TaxonomyCell {
 export interface ReportModel {
   generatedAt: string;
   repoName: string;
+  /** Public/private history — frames the cutoff split (contamination vs
+   * knowledge-freshness vs neutral). From config.repoVisibility. */
+  repoVisibility: "public" | "private" | "mixed" | "unknown";
   suite: {
     admitted: number;
     candidates: number;

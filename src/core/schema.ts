@@ -71,6 +71,16 @@ export const ConfigSchema = z.object({
    * baseline). Model id → ISO date (YYYY-MM-DD). Used by contamination splits.
    */
   cutoffs: z.record(z.string(), z.string()).optional(),
+  /**
+   * The target repo's public/private history — decides how the cutoff split is
+   * FRAMED (§7). For a public/mixed repo, pre-cutoff tasks carry real
+   * memorization-contamination risk (post-cutoff is the clean number). For a
+   * private repo the model never saw the code, so the same split instead
+   * measures knowledge freshness (post-cutoff may be HARDER — the model lacks
+   * ecosystem changes after its cutoff), not contamination. Default "unknown"
+   * presents the split neutrally rather than overclaiming either way.
+   */
+  repoVisibility: z.enum(["public", "private", "mixed", "unknown"]).default("unknown"),
   /** Validity-gate replay count `k` (§ gate). Default 2. */
   gateReplays: z.number().int().positive().default(2),
   /** Per-verifier-run wall-clock cap (ms). A run exceeding it is treated as an
@@ -92,6 +102,7 @@ export const ConfigSchema = z.object({
     .optional(),
 });
 export type Config = z.infer<typeof ConfigSchema>;
+export type RepoVisibility = Config["repoVisibility"];
 
 /**
  * A reconstructed task: `.guignet/tasks/<taskId>/task.json`. The held-out

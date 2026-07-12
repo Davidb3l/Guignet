@@ -113,7 +113,7 @@ function leaderboard(configs: ConfigReport[]): string {
     })
     .join("");
   return `<section class="reveal">
-    <h2>Leaderboard <span class="th-note">solve rate is post-cutoff (the clean number) · CI always shown</span></h2>
+    <h2>Leaderboard <span class="th-note">solve rate shown is post-cutoff · CI always shown</span></h2>
     <div class="scroll"><table class="lb">
       <thead><tr><th>Config</th><th class="num">n</th><th>Post-cutoff solve rate <span class="th-note">(95% CI)</span></th><th class="num">$/solved</th><th class="num">Output tok</th><th class="num">Median wall</th><th class="num">Bloat</th></tr></thead>
       <tbody>${rows}</tbody>
@@ -122,36 +122,89 @@ function leaderboard(configs: ConfigReport[]): string {
   </section>`;
 }
 
-function subsetCell(s: SubsetReport, primary: boolean): string {
-  const cls = primary ? "split-post" : "split-pre";
+/**
+ * How the cutoff split is framed depends on the repo's public/private history
+ * (§7). Same underlying number, different meaning — so different copy. Getting
+ * this right is the whole point: calling a private repo's pre-cutoff column
+ * "possibly seen" would be a contamination overclaim (the model never saw it).
+ */
+interface SplitFraming {
+  title: string;
+  note: string;
+  postTag: string;
+  preTag: string;
+  /** Only gray the pre column when it genuinely carries contamination suspicion. */
+  grayPre: boolean;
+}
+function splitFraming(v: ReportModel["repoVisibility"]): SplitFraming {
+  const caveat = "Post-cutoff tasks are also simply more recent commits, so this split is suggestive, not dispositive.";
+  switch (v) {
+    case "public":
+      return {
+        title: "Contamination split",
+        note: `The model may have trained on this repo's public history. The <strong>post-cutoff</strong> column is the honest measure of skill; pre-cutoff is grayed because the model may have seen those fixes. ${caveat}`,
+        postTag: `<span class="split-tag">clean</span>`,
+        preTag: `<span class="split-tag muted">possibly seen</span>`,
+        grayPre: true,
+      };
+    case "mixed":
+      return {
+        title: "Contamination split · mixed history",
+        note: `Some of this repo's history was public, so pre-cutoff tasks carry contamination risk for the public era. A fully clean read would need private-era selection (not in v0). ${caveat}`,
+        postTag: `<span class="split-tag">clean</span>`,
+        preTag: `<span class="split-tag muted">possibly seen</span>`,
+        grayPre: true,
+      };
+    case "private":
+      return {
+        title: "Cutoff split · knowledge freshness",
+        note: `This repo is private, so memorization-contamination risk is low — the model never saw these commits. Instead the split shows knowledge freshness: post-cutoff tasks may lean on ecosystem changes (a new library, API, or language version) the model doesn't know, so a lower post-cutoff score reflects staleness, not contamination. Neither column is "clean." ${caveat}`,
+        postTag: `<span class="split-tag muted">newer than model</span>`,
+        preTag: `<span class="split-tag muted">within model era</span>`,
+        grayPre: false,
+      };
+    default: // unknown
+      return {
+        title: "Cutoff split · informational",
+        note: `Set <span class="mono">repoVisibility</span> ("public" | "private" | "mixed") in <span class="mono">.guignet/config.json</span> for a contamination-vs-freshness read. As shown this is a plain recency split — no contamination claim either way. ${caveat}`,
+        postTag: "",
+        preTag: "",
+        grayPre: false,
+      };
+  }
+}
+
+function subsetCell(s: SubsetReport, primary: boolean, f: SplitFraming): string {
+  const cls = primary ? "split-post" : f.grayPre ? "split-pre split-pre-gray" : "split-pre";
   const rate = s.solveRate === null
     ? `<span class="split-num">—</span>`
     : `<span class="split-num mono">${esc(pct(s.solveRate))}</span>`;
   const ci = s.ci ? `<div class="ci-note mono">CI ${esc(pct(s.ci.low))}–${esc(pct(s.ci.high))}</div>` : "";
   return `<div class="split-box ${cls}">
-    <div class="split-head">${primary ? "post-cutoff" : "pre-cutoff"}${primary ? ` <span class="split-tag">clean</span>` : ` <span class="split-tag muted">possibly seen</span>`}</div>
+    <div class="split-head">${primary ? "post-cutoff" : "pre-cutoff"}${primary ? ` ${f.postTag}` : ` ${f.preTag}`}</div>
     ${rate}
     <div class="split-meta mono">${s.tasksSolved}/${s.tasksTotal} tasks</div>
     ${ci}
   </div>`;
 }
 
-function cutoffSplit(configs: ConfigReport[]): string {
-  const scored = configs.filter((c) => c.cutoffDate !== null);
+function cutoffSplit(model: ReportModel): string {
+  const scored = model.configs.filter((c) => c.cutoffDate !== null);
   if (scored.length === 0) {
-    return `<section class="reveal"><h2>Contamination split</h2><p class="note">No config's model was found in the cutoff registry, so no pre/post split can be drawn. Add cutoffs in <span class="mono">.guignet/config.json</span>.</p></section>`;
+    return `<section class="reveal"><h2>Cutoff split</h2><p class="note">No config's model was found in the cutoff registry, so no pre/post split can be drawn. Add cutoffs in <span class="mono">.guignet/config.json</span>.</p></section>`;
   }
+  const f = splitFraming(model.repoVisibility);
   const blocks = scored
     .map(
       (c) => `<div class="split-row">
       <div class="split-label"><span class="mono">${esc(c.label)}</span>${c.watermarked ? ` <span class="watermark sm">n=1</span>` : ""}<div class="ci-note mono">cutoff ${esc(c.cutoffDate!)}</div></div>
-      <div class="split-pair">${subsetCell(c.split.post, true)}${subsetCell(c.split.pre, false)}</div>
+      <div class="split-pair">${subsetCell(c.split.post, true, f)}${subsetCell(c.split.pre, false, f)}</div>
     </div>`,
     )
     .join("");
   return `<section class="reveal">
-    <h2>Contamination split <span class="th-note">post-cutoff is the clean number</span></h2>
-    <p class="note">A model may have trained on your public history. The <strong>post-cutoff</strong> column is the honest measure of skill; the pre-cutoff column is grayed because the model may have seen those fixes.</p>
+    <h2>${esc(f.title)} <span class="th-note">repo: ${esc(model.repoVisibility)}</span></h2>
+    <p class="note">${f.note}</p>
     <div class="splits">${blocks}</div>
   </section>`;
 }
@@ -233,7 +286,7 @@ export function renderReportHtml(model: ReportModel): string {
     </header>`,
     headlineStrip(model.configs),
     leaderboard(model.configs),
-    cutoffSplit(model.configs),
+    cutoffSplit(model),
     taxonomy(model.taxonomy),
     flagsAndSoundness(model),
     methodology(model),
@@ -348,7 +401,8 @@ tbody tr:hover{background:rgba(64,130,109,.06)}
 .split-pair{display:grid; grid-template-columns:1fr 1fr; gap:14px}
 .split-box{padding:14px 16px; border-radius:8px}
 .split-post{background:linear-gradient(180deg, rgba(80,200,120,.14), rgba(30,77,61,.12)); border:1px solid var(--g-viridian)}
-.split-pre{background:rgba(20,28,25,.5); border:1px solid var(--g-line); filter:grayscale(1) opacity(.72)}
+.split-pre{background:rgba(20,28,25,.5); border:1px solid var(--g-line)}
+.split-pre-gray{filter:grayscale(1) opacity(.72)}
 .split-head{font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:.14em; color:var(--g-ink-muted)}
 .split-tag{font-size:9px; padding:1px 6px; border-radius:999px; border:1px solid var(--g-pass); color:var(--g-pass); letter-spacing:.06em}
 .split-tag.muted{border-color:var(--g-ink-muted); color:var(--g-ink-muted)}
@@ -398,7 +452,7 @@ tbody tr:hover{background:rgba(64,130,109,.06)}
   .headline{background:#f3f7f4; border-color:#cfe0d7}
   .hl-number,.rate-num,.split-post .split-num,.tile-num{color:#1E4D3D; text-shadow:none}
   h2{border-color:#cfe0d7}
-  .split-pre{filter:none; opacity:.6}
+  .split-pre-gray{filter:none; opacity:.6}
   section,footer{break-inside:avoid}
 }
 `;
