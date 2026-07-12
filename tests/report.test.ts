@@ -60,7 +60,7 @@ function attempt(taskId: string, n: number, dollars: number | null): Attempt {
   return { taskId, attempt: n, wallclockMs: 1000 * n, tokens: dollars === null ? null : { input: 10, output: 20, cacheRead: 100, cacheCreation: 5 }, dollars, exit: "completed" };
 }
 function verdict(taskId: string, n: number, passed: boolean, era: Verdict["cutoffEra"], flag: boolean): Verdict {
-  return { taskId, attempt: n, passed, bloatRatio: 1.5, similarity: flag ? 0.9 : 0.1, regurgitationFlag: flag, cutoffEra: era };
+  return { taskId, attempt: n, passed, bloatRatio: 1.5, similarity: flag ? 0.9 : 0.1, regurgitationFlag: flag, cutoffEra: era, testEditsFiltered: false };
 }
 
 async function seedRun(repo: string): Promise<void> {

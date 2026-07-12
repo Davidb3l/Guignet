@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { runMine, buildVerifierCmd } from "../src/mine/index.ts";
-import { classifyPaths, isTestFile, isSourceFile } from "../src/mine/classify.ts";
+import { classifyPaths, isTestFile, isSourceFile } from "../src/core/classify.ts";
 import { discover, compileLoosePrefix } from "../src/mine/discover.ts";
 import { buildPromptContext, reconstructPrompt } from "../src/mine/prompt.ts";
 import { buildTaxonomy, kindOf, areasOf } from "../src/mine/taxonomy.ts";

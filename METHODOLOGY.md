@@ -85,6 +85,21 @@ un-judgeable condition (the solution won't apply, the environment won't build,
 the verifier crashes or hangs) resolves to a fail — the agent gets no credit for
 a solution that couldn't be objectively verified.
 
+**The verifier is authoritative over its own paths.** Agents routinely fix the
+source *and* write their own tests — often in the very files the held-out
+verifier patches. Before the overlay, Guignet sets aside every part of the
+solution that touches a held-out path (a file the verifier diff touches, or any
+test-classified file, by the same rule mining used to split fix from verifier).
+The agent is judged on its source change alone — the mirror of what the
+validity gate proved (base + source fix + verifier) — so its own test edits are
+neither punished nor rewarded. This cannot credit a wrong fix: the real
+verifier is restored over any agent edit to it, and a solution whose only
+change is test edits has nothing to judge and fails. Verdicts record a
+`testEditsFiltered` flag whenever this projection removed anything, and the
+secondary metrics below are computed on the same source-only projection
+(the ground-truth fix is source-only by construction, so anything else would
+compare unlike things).
+
 A task is **solved** by a config if at least one of its attempts passes
 (resolve@n). The headline number is **$ per solved task**. Solve rates carry a
 **95% Wilson confidence interval**, always rendered — on the small suites a

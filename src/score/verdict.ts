@@ -2,12 +2,28 @@
  * Verifier replay — the PRIMARY, judge-free verdict (ARCHITECTURE.md §5). For
  * ONE attempt: does the agent's solution make the held-out verifier pass?
  *
- * Fresh worktree at the task's base commit → apply the agent's `solution.diff`
- * → apply the held-out `verifier.diff` (the tests) → run `task.verifierCmd`.
- * Pass = exit 0 with no timeout. Binary and objective; no LLM judge ever sees
- * this path (§9 wedge). The secondary contamination metrics (bloat, similarity,
- * cutoff era, regurgitation flag) need only the diffs + registry, so they are
- * computed with NO worktree.
+ * Fresh worktree at the task's base commit → apply the agent's solution,
+ * PROJECTED to its source side (below) → apply the held-out `verifier.diff`
+ * (the tests) → run `task.verifierCmd`. Pass = exit 0 with no timeout. Binary
+ * and objective; no LLM judge ever sees this path (§9 wedge). The secondary
+ * contamination metrics (bloat, similarity, cutoff era, regurgitation flag)
+ * need only the diffs + registry, so they are computed with NO worktree.
+ *
+ * The verifier-authoritative overlay (METHODOLOGY.md §4): agents routinely fix
+ * the source AND write their own tests — frequently in the very files the
+ * held-out verifier patches (on the zod dogfood corpus, 35/42 non-empty
+ * solutions did). A strict `git apply` of the verifier over such a solution
+ * fails on hunk-collision LUCK, not fix quality — near-identical attempts of
+ * one task flipped pass/fail on whether line numbers happened to collide. So
+ * before the overlay, every solution block touching a held-out path (a
+ * verifier-diff path, or any test-classified path) is set aside
+ * (solution-filter.ts), and the agent is judged on exactly the configuration
+ * class the gate validated: base + source-side change + verifier. Its own test
+ * edits are neither punished nor rewarded — the verifier is authoritative over
+ * its paths, and `verifierCmd` runs those held-out tests, so discarded edits
+ * cannot influence the verdict in either direction. This cannot wrongly credit
+ * (fail-safe direction preserved): a wrong source fix still fails the verifier;
+ * an agent whose ONLY change was test edits has no judgeable work and fails.
  *
  * This mirrors gate/replay.ts: it owns the full worktree lifecycle for a single
  * unit of work and ALWAYS tears the worktree down in a `finally`, so a large
@@ -48,6 +64,7 @@ import {
 // stays statically checkable.
 import { readTruth } from "../core/truth.ts";
 import { bloatRatio, diffSimilarity, isRegurgitation } from "./contamination.ts";
+import { diffFilePaths, stripHeldOutPaths } from "./solution-filter.ts";
 
 /** What replayVerdict needs to score one attempt. */
 export interface VerdictInputs {
@@ -61,8 +78,9 @@ export interface VerdictInputs {
 }
 
 /** A verdict plus a non-persisted reason for the orchestrator's stderr log.
- * `note` never enters verdict.json (the schema is frozen and has no reason
- * field); it only enriches human/-v progress output. */
+ * `note` never enters verdict.json (the schema has no free-text reason field —
+ * only the structured `testEditsFiltered` flag persists WHY a judged diff may
+ * differ from solution.diff); it only enriches human/-v progress output. */
 export interface VerdictResult {
   verdict: Verdict;
   note: string | null;
@@ -105,10 +123,21 @@ export async function replayVerdict(
   const truth = await readTruth(repoRoot, task.id);
   const era: CutoffEra = classifyEra(task.date, cutoffIso);
 
+  // The source-only projection of the solution (see the header): blocks
+  // touching a verifier-diff path or any test-classified path are set aside.
+  // `judged.kept` is what gets applied AND what the secondary metrics see.
+  const judged = stripHeldOutPaths(solutionDiff, diffFilePaths(truth.verifierDiff));
+  const testEditsFiltered = judged.droppedPaths.length > 0;
+
   // Secondary metrics — pure functions of the diffs + truth + registry, so they
   // need no worktree and are computed the same whether or not the verifier runs.
-  const similarity = diffSimilarity(solutionDiff, truth.fixDiff);
-  const bloat = bloatRatio(solutionDiff, truth.fixDiff);
+  // Computed on the SOURCE-ONLY projection, because `fix.diff` is source-only
+  // by construction (mine's split): full-solution metrics compared apples to
+  // apples-plus-tests — inflating bloat for the normal habit of writing tests,
+  // and DILUTING similarity, which could mask a regurgitated fix (the flag's
+  // fail-safe direction wants sensitivity, so the tests must not water it down).
+  const similarity = diffSimilarity(judged.kept, truth.fixDiff);
+  const bloat = bloatRatio(judged.kept, truth.fixDiff);
   const regurgitationFlag = isRegurgitation(similarity, era);
 
   const verdict = (passed: boolean): Verdict => ({
@@ -119,12 +148,29 @@ export async function replayVerdict(
     similarity,
     regurgitationFlag,
     cutoffEra: era,
+    testEditsFiltered,
   });
+
+  // Every note carries the filtering fact when it applies, so the -v log always
+  // explains a verdict whose judged diff differs from solution.diff on disk.
+  const filteredNote = testEditsFiltered
+    ? `set aside edits to ${judged.droppedPaths.length} held-out path(s): ${judged.droppedPaths.join(", ")}`
+    : null;
+  const withFilter = (note: string | null): string | null =>
+    filteredNote ? (note ? `${note} — ${filteredNote}` : filteredNote) : note;
 
   // The agent produced nothing — there is nothing to verify. Resolve to a fail
   // WITHOUT spawning a worktree (the whole apply→run path would be moot).
   if (solutionDiff.trim() === "") {
     return { verdict: verdict(false), note: "empty solution diff (agent produced nothing)" };
+  }
+
+  // The agent ONLY edited held-out paths — there is no source-side work to
+  // judge. The gate proved the verifier fails at base without the real fix, so
+  // this resolves to a fail without spawning a worktree. (An agent cannot pass
+  // by rewriting the tests; that is the point of holding them out.)
+  if (judged.kept.trim() === "") {
+    return { verdict: verdict(false), note: withFilter("solution contained only held-out test-path edits — no source change to judge") };
   }
 
   // `git worktree add` wants a NON-existent target, so we point it INSIDE the
@@ -165,30 +211,35 @@ export async function replayVerdict(
     // Pristine base (see resetWorktree) before applying the agent's work.
     await resetWorktree(worktreeDir);
 
-    // Apply the AGENT's solution first. If it doesn't apply, the diff is unusable
-    // (stale, malformed, or against the wrong base) ⇒ no credit, and we stop —
-    // there is nothing to run.
-    const sol = await applyDiff(worktreeDir, solutionDiff);
+    // Apply the AGENT's judged (source-only) solution first. If it doesn't
+    // apply, the diff is unusable (stale, malformed, or against the wrong base)
+    // ⇒ no credit, and we stop — there is nothing to run. Blocks of a unified
+    // diff are independent under `git apply`, so the filtering above cannot be
+    // what broke it.
+    const sol = await applyDiff(worktreeDir, judged.kept);
     if (!sol.ok) {
-      return { verdict: verdict(false), note: `agent solution diff did not apply: ${snippet(sol.stderr)}` };
+      return { verdict: verdict(false), note: withFilter(`agent solution diff did not apply: ${snippet(sol.stderr)}`) };
     }
 
-    // Then overlay the held-out verifier (the tests). If THIS fails to apply,
-    // the agent's solution collided with the held-out tests — it edited files
-    // the verifier also touches. We can't render an honest verdict ⇒ fail.
+    // Then overlay the held-out verifier (the tests). Collisions with the
+    // agent's test edits were already set aside, so a failure HERE means the
+    // truth artifact itself doesn't apply at this base (corrupt/stale truth) —
+    // or a solution block our filter failed to attribute to a verifier path
+    // still collided. Either way we can't render an honest verdict ⇒ fail
+    // (the fail-safe direction: never wrongly credit).
     const ver = await applyDiff(worktreeDir, truth.verifierDiff);
     if (!ver.ok) {
-      return { verdict: verdict(false), note: `held-out verifier diff did not apply over the solution: ${snippet(ver.stderr)}` };
+      return { verdict: verdict(false), note: withFilter(`held-out verifier diff did not apply over the solution: ${snippet(ver.stderr)}`) };
     }
 
     // The primary verdict: run the held-out verifier. Pass iff it exits 0 within
     // the timeout. A timeout or a null exit (killed/crashed — an environment
     // problem, not a passing test) is NOT a pass.
     const r = await runShell(task.verifierCmd, { cwd: execCwd, timeoutMs });
-    if (r.timedOut) return { verdict: verdict(false), note: "verifier timed out" };
-    if (r.code === null) return { verdict: verdict(false), note: "verifier could not run (killed/crashed)" };
+    if (r.timedOut) return { verdict: verdict(false), note: withFilter("verifier timed out") };
+    if (r.code === null) return { verdict: verdict(false), note: withFilter("verifier could not run (killed/crashed)") };
     const passed = r.code === 0;
-    return { verdict: verdict(passed), note: passed ? null : `verifier failed (exit ${r.code})` };
+    return { verdict: verdict(passed), note: withFilter(passed ? null : `verifier failed (exit ${r.code})`) };
   } finally {
     // Always tear down — a worktree leak across a large run is a real bug.
     await worktreeRemove(repoRoot, worktreeDir);

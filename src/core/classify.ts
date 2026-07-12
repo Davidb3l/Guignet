@@ -6,6 +6,13 @@
  * source file misclassified as a test would leak the fix into the verifier, so
  * the test test is deliberately conservative: a file is a test only if its name
  * or path says so unambiguously.
+ *
+ * Lives in `core/` (not `mine/`) because BOTH sides of the held-out split need
+ * the same rule: `mine/` uses it to divide a commit into fix vs verifier, and
+ * `score/` uses it to judge an agent on the same source-side projection the
+ * gate validated (score/verdict.ts — the verifier-authoritative overlay). The
+ * two stages may not import each other (§4), so the shared classifier lives in
+ * the leaf they both may depend on. Pure path logic; no diff content.
  */
 
 /** Extensions we treat as executable source code (a "fix" touches these). */

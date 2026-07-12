@@ -19,6 +19,7 @@ import { ConfigSchema, RunConfigSchema, type Task } from "../src/core/schema.ts"
 import { readVerdict, verdictExists, writeConfig, writeRunConfig, writeSolutionDiff, writeTask } from "../src/core/store.ts";
 import { writeTruth } from "../src/core/truth.ts";
 import { runScore } from "../src/score/index.ts";
+import { diffFilePaths, stripHeldOutPaths } from "../src/score/solution-filter.ts";
 
 const RUN_ID = "r1";
 const MODEL = "test-model";
@@ -126,6 +127,35 @@ async function seedTask(
   await writeTruth(repo, id, { fixDiff: s.fixGood, verifierDiff: s.verifierA });
   await writeSolutionDiff(repo, RUN_ID, id, 1, solutionDiff);
 }
+
+describe("solution-filter (pure)", () => {
+  const NEW_FILE = // a brand-new file, as `git diff` renders it (--- /dev/null)
+    "diff --git a/pkg/tests/new.test.ts b/pkg/tests/new.test.ts\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/pkg/tests/new.test.ts\n@@ -0,0 +1 @@\n+x\n";
+  const SRC =
+    "diff --git a/src/a.ts b/src/a.ts\nindex 2222222..3333333 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+  const VER_TOUCHED = // not test-classified by name — caught via the verifier path set
+    "diff --git a/verify.ts b/verify.ts\nindex 4444444..5555555 100644\n--- a/verify.ts\n+++ b/verify.ts\n@@ -1 +1 @@\n-a\n+b\n";
+
+  test("extracts paths from headers, ---/+++, and new-file blocks", () => {
+    expect(diffFilePaths(NEW_FILE + SRC)).toEqual(new Set(["pkg/tests/new.test.ts", "src/a.ts"]));
+  });
+
+  test("drops verifier-path and test-classified blocks; keeps source blocks intact", () => {
+    const { kept, droppedPaths } = stripHeldOutPaths(NEW_FILE + VER_TOUCHED + SRC, new Set(["verify.ts"]));
+    expect(kept).toBe(SRC); // byte-identical — surgery removes whole blocks only
+    expect(droppedPaths).toEqual(["pkg/tests/new.test.ts", "verify.ts"]);
+  });
+
+  test("a deleted content line resembling a --- header does not poison its block", () => {
+    // A removed SQL comment `-- tests/x` renders as `--- tests/x` INSIDE a hunk;
+    // path sniffing must have stopped at the block's first @@.
+    const sql =
+      "diff --git a/src/q.sql b/src/q.sql\nindex 6666666..7777777 100644\n--- a/src/q.sql\n+++ b/src/q.sql\n@@ -1,2 +1 @@\n--- tests/x\n select 1;\n";
+    const { kept, droppedPaths } = stripHeldOutPaths(sql, new Set(["verify.ts"]));
+    expect(kept).toBe(sql);
+    expect(droppedPaths).toEqual([]);
+  });
+});
 
 describe("score verdict", () => {
   test("(a) a correct solution makes the held-out verifier pass", async () => {
@@ -271,6 +301,131 @@ describe("score verdict", () => {
     expect(v.passed).toBe(false);
     expect(v.cutoffEra).toBe("unknown");
     expect(v.similarity).toBeNull();
+  });
+
+  // --- the verifier-authoritative overlay (score/verdict.ts header) ---
+  // Agents habitually fix the source AND write their own tests, frequently in
+  // the very file the held-out verifier patches. These pin the semantics: the
+  // agent is judged on its source projection only; held-out-path edits are set
+  // aside — neither punished (k) nor rewarded (l, m, n).
+
+  test("(k) editing the verifier's file + a CORRECT source fix passes (edits set aside)", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    await writeRun(s.repo);
+    // The agent fixes a.ts AND authors its own verifyA.ts — the same file the
+    // held-out verifier CREATES ("already exists in working directory" under a
+    // strict apply). The agent's version would FAIL if it were ever run; it
+    // must not be, and must not block the verdict.
+    await Bun.write(join(s.repo, "a.ts"), "export const f = (a: number, b: number) => a + b;\n");
+    await Bun.write(join(s.repo, "verifyA.ts"), 'console.error("agent test ran"); process.exit(1);\n');
+    await commit(s.repo, "agent: correct fix + own colliding test");
+    const sha = await head(s.repo);
+    const solution = (await git(["diff", s.base, sha, "--", "a.ts", "verifyA.ts"], s.repo)).stdout;
+    await seedTask(s.repo, s, "collide-good", POST_DATE, solution);
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    const v = await readVerdict(s.repo, RUN_ID, "collide-good", 1);
+    expect(v.passed).toBe(true);
+    expect(v.testEditsFiltered).toBe(true);
+    // Secondary metrics see the source-only projection: the judged diff IS the
+    // ground-truth fix, so the agent's test file inflates/dilutes nothing.
+    expect(v.similarity).toBe(1);
+    expect(v.bloatRatio).toBe(1);
+  });
+
+  test("(l) rewriting the verifier to always-pass cannot save a WRONG fix", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    await writeRun(s.repo);
+    // The gaming attempt: wrong fix (a*b) + a verifyA.ts that exits 0
+    // unconditionally. The overlay restores the REAL verifier over its own
+    // path, so the wrong fix is caught.
+    await Bun.write(join(s.repo, "a.ts"), "export const f = (a: number, b: number) => a * b;\n");
+    await Bun.write(join(s.repo, "verifyA.ts"), "process.exit(0);\n");
+    await commit(s.repo, "agent: wrong fix + neutered verifier");
+    const sha = await head(s.repo);
+    const solution = (await git(["diff", s.base, sha, "--", "a.ts", "verifyA.ts"], s.repo)).stdout;
+    await seedTask(s.repo, s, "collide-bad", POST_DATE, solution);
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    const v = await readVerdict(s.repo, RUN_ID, "collide-bad", 1);
+    expect(v.passed).toBe(false);
+    expect(v.testEditsFiltered).toBe(true);
+  });
+
+  test("(m) a solution that ONLY edits held-out paths has nothing to judge — fail", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    await writeRun(s.repo);
+    await Bun.write(join(s.repo, "verifyA.ts"), "process.exit(0);\n");
+    await commit(s.repo, "agent: test-only 'solution'");
+    const sha = await head(s.repo);
+    const solution = (await git(["diff", s.base, sha, "--", "verifyA.ts"], s.repo)).stdout;
+    await seedTask(s.repo, s, "test-only", POST_DATE, solution);
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain("no source change to judge");
+    const v = await readVerdict(s.repo, RUN_ID, "test-only", 1);
+    expect(v.passed).toBe(false);
+    expect(v.testEditsFiltered).toBe(true);
+  });
+
+  test("(n) editing a test-classified helper OUTSIDE the verifier's paths is also set aside", async () => {
+    // The subtler gaming vector: the verifier's test imports a helper the
+    // verifier diff does NOT touch. An agent with a wrong fix edits that helper
+    // to make the assertion agree with its bug. Test-classified paths are
+    // filtered like verifier paths (same core/classify.ts rule mine split with,
+    // so no correct fix can ever NEED them) — the wrong fix must still fail.
+    const repo = await tmp();
+    await git(["init", "-q", "-b", "main"], repo);
+    await git(["config", "user.email", "t@example.com"], repo);
+    await git(["config", "user.name", "Test"], repo);
+    await Bun.write(join(repo, "a.ts"), "export const f = (a: number, b: number) => a - b;\n");
+    await Bun.write(join(repo, "tests/helper.ts"), "export const EXPECTED = 5;\n");
+    await commit(repo, "base (buggy) + helper");
+    const base = await head(repo);
+    await Bun.write(join(repo, "a.ts"), "export const f = (a: number, b: number) => a + b;\n");
+    await Bun.write(
+      join(repo, "verifyB.ts"),
+      'import { f } from "./a.ts";\nimport { EXPECTED } from "./tests/helper.ts";\nif (f(2, 3) !== EXPECTED) { console.error("FAIL"); process.exit(1); }\n',
+    );
+    await commit(repo, "fix + verifier that imports the helper");
+    const fixSha = await head(repo);
+    // Agent: wrong fix (f=6) + helper bent to expect 6. Neither the verifier's
+    // own file nor a verifier-diff path is touched.
+    await Bun.write(join(repo, "a.ts"), "export const f = (a: number, b: number) => a * b;\n");
+    await Bun.write(join(repo, "tests/helper.ts"), "export const EXPECTED = 6;\n");
+    await commit(repo, "agent: wrong fix + bent helper");
+    const agentSha = await head(repo);
+
+    const diff = async (to: string, ...paths: string[]): Promise<string> =>
+      (await git(["diff", base, to, "--", ...paths], repo)).stdout;
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun run verifyB.ts", cutoffs: { [MODEL]: CUTOFF } }));
+    await writeRunConfig(repo, RunConfigSchema.parse({ runId: RUN_ID, adapter: "claude-code", model: MODEL, nAttempts: 1 }));
+    await writeTask(repo, { ...makeTask("bent-helper", base, POST_DATE), verifierCmd: "bun run verifyB.ts" });
+    await writeTruth(repo, "bent-helper", { fixDiff: await diff(fixSha, "a.ts"), verifierDiff: await diff(fixSha, "verifyB.ts") });
+    await writeSolutionDiff(repo, RUN_ID, "bent-helper", 1, await diff(agentSha, "a.ts", "tests/helper.ts"));
+
+    const run = await runScore({ repoRoot: repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    const v = await readVerdict(repo, RUN_ID, "bent-helper", 1);
+    expect(v.passed).toBe(false); // EXPECTED stays 5; f(2,3)=6 — caught
+    expect(v.testEditsFiltered).toBe(true);
+  });
+
+  test("(o) a solution with no held-out-path edits records testEditsFiltered:false", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    await writeRun(s.repo);
+    await seedTask(s.repo, s, "clean", POST_DATE, s.fixGood);
+    await runScore({ repoRoot: s.repo, json: true, force: false });
+    const v = await readVerdict(s.repo, RUN_ID, "clean", 1);
+    expect(v.passed).toBe(true);
+    expect(v.testEditsFiltered).toBe(false);
   });
 
   test("(j) under --json, stdout is exactly one JSON object (logs go to stderr)", async () => {

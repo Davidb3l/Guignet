@@ -276,5 +276,14 @@ export const VerdictSchema = z.object({
   regurgitationFlag: z.boolean(),
   /** Which side of the run model's training cutoff this task's date falls on. */
   cutoffEra: CutoffEraSchema,
+  /**
+   * True when the solution ALSO edited held-out verifier/test paths and those
+   * edits were set aside before judging (score/verdict.ts — the verifier is
+   * authoritative over its own paths; the agent is judged on its source fix
+   * only). Transparency, not a penalty: pass/fail above already reflects the
+   * source-only projection. Defaulted so verdicts written before this field
+   * existed still parse.
+   */
+  testEditsFiltered: z.boolean().default(false),
 });
 export type Verdict = z.infer<typeof VerdictSchema>;

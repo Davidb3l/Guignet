@@ -18,6 +18,7 @@ import { existsSync } from "node:fs";
 import {
   EXIT,
   changedFiles,
+  classifyPaths,
   emitEvent,
   fileDiff,
   listCommits,
@@ -36,7 +37,6 @@ import {
   type Task,
 } from "../core/index.ts";
 import { writeTruth } from "../core/truth.ts";
-import { classifyPaths } from "./classify.ts";
 import { compileLoosePrefix, discover } from "./discover.ts";
 import { buildPromptContext, reconstructPrompt } from "./prompt.ts";
 import { buildTaxonomy } from "./taxonomy.ts";

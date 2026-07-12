@@ -53,7 +53,7 @@ function emptySummary(runId: string): RunSummary {
 
 /** A defensible verdict for an attempt we could not load/replay — never a pass. */
 function unscoreable(taskId: string, attempt: number, era: Verdict["cutoffEra"]): Verdict {
-  return { taskId, attempt, passed: false, bloatRatio: null, similarity: null, regurgitationFlag: false, cutoffEra: era };
+  return { taskId, attempt, passed: false, bloatRatio: null, similarity: null, regurgitationFlag: false, cutoffEra: era, testEditsFiltered: false };
 }
 
 /** Score every attempt of one run, writing a verdict.json each. Accumulates into
