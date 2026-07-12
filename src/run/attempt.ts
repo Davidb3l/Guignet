@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import {
   captureWorktreeDiff,
+  git,
   runShell,
   transcriptDir as transcriptDirFor,
   writeAttempt,
@@ -84,6 +85,13 @@ export async function runOneAttempt(
     // the wall-clock starts and its time never counts against the agent.
     if (env.setupCmd) {
       await runShell(env.setupCmd, { cwd: worktreeSubdir, timeoutMs: env.setupTimeoutMs });
+      // Setup (e.g. `bun install`) can modify TRACKED files — most commonly a
+      // lockfile (bun.lockb, yarn.lock). Revert tracked changes so the captured
+      // solution diff reflects ONLY the agent's work, not install churn (which
+      // would otherwise pollute the diff and, for a binary lockfile, break the
+      // apply at score time). Untracked installs (node_modules) are kept — that
+      // is the whole point of running setup.
+      await git(["checkout", "--", "."], worktreeDir);
     }
 
     // wall-clock brackets ONLY the agent run (§5 — the runner's measure of the

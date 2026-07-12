@@ -208,6 +208,29 @@ describe("runRun end-to-end (generic-cli)", () => {
     expect(diff).toContain("agent-used-dep.txt"); // agent saw the installed dep
   });
 
+  test("setup's tracked churn (e.g. a lockfile) is excluded from the solution diff", async () => {
+    const { repo } = await initRepo();
+    // 'lock.txt' is a committed (tracked) file — like a lockfile setup rewrites.
+    const sh = async (c: string): Promise<void> => {
+      const p = Bun.spawn(["sh", "-c", c], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+      if ((await p.exited) !== 0) throw new Error(c);
+    };
+    await writeFile(join(repo, "lock.txt"), "v1\n");
+    await sh("git add -A && git commit -qm 'add lock'");
+    const base2 = (await git(["rev-parse", "HEAD"], repo)).stdout.trim();
+
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test", setupCmd: "echo v2 > lock.txt" }));
+    await writeSuite(repo, { taskIds: ["t1"], soundnessRate: { admitted: 1, candidates: 1 }, minedAt: new Date().toISOString() });
+    await writeTask(repo, { ...makeTask("t1", base2) });
+    // The agent only creates a NEW source file; setup rewrites the tracked lock.
+    const cfg = await writeRunCfg(repo, "echo fix > realfix.ts", 1);
+
+    await runRun({ repoRoot: repo, json: true, force: false, config: cfg });
+    const diff = await readFile(join(attemptDir(repo, "2026-07-11-mock", "t1", 1), "solution.diff"), "utf-8");
+    expect(diff).toContain("realfix.ts"); // the agent's actual work is captured
+    expect(diff).not.toContain("lock.txt"); // setup's tracked churn is NOT
+  });
+
   test("resume: a second run skips completed attempts; --force redoes them", async () => {
     const { repo, base } = await initRepo();
     await seedSuite(repo, base, ["t1"]);

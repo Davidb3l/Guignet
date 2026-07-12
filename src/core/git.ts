@@ -216,6 +216,10 @@ export function applyDiff(worktreeDir: string, diffText: string): Promise<GitRes
  */
 export async function captureWorktreeDiff(worktreeDir: string): Promise<string> {
   await git(["add", "-A"], worktreeDir);
-  const r = await git(["diff", "--cached", "HEAD"], worktreeDir);
+  // `--binary` emits a full binary patch (with the index line), so a solution
+  // that touches a binary file still APPLIES at score time — an abbreviated
+  // binary diff is rejected by `git apply` ("cannot apply binary patch … without
+  // full index line").
+  const r = await git(["diff", "--cached", "--binary", "HEAD"], worktreeDir);
   return r.ok ? r.stdout : "";
 }
