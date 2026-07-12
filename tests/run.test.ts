@@ -191,6 +191,23 @@ describe("runRun end-to-end (generic-cli)", () => {
     }
   });
 
+  test("setupCmd runs BEFORE the agent so it starts from a ready environment", async () => {
+    const { repo, base } = await initRepo();
+    // Config's setupCmd installs a "dep"; the agent (generic-cli) only succeeds
+    // if that dep is already there — proving setup ran first, in the worktree.
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test", setupCmd: "echo dep > installed.txt" }));
+    await writeSuite(repo, { taskIds: ["t1"], soundnessRate: { admitted: 1, candidates: 1 }, minedAt: new Date().toISOString() });
+    await writeTask(repo, makeTask("t1", base));
+    // The agent copies the dep into a new file; the diff will only contain it if
+    // setup created installed.txt before the agent ran.
+    const cfg = await writeRunCfg(repo, "cp installed.txt agent-used-dep.txt", 1);
+
+    const run = await runRun({ repoRoot: repo, json: true, force: false, config: cfg });
+    expect(JSON.parse(run.stdout).byExit.completed).toBe(1);
+    const diff = await readFile(join(attemptDir(repo, "2026-07-11-mock", "t1", 1), "solution.diff"), "utf-8");
+    expect(diff).toContain("agent-used-dep.txt"); // agent saw the installed dep
+  });
+
   test("resume: a second run skips completed attempts; --force redoes them", async () => {
     const { repo, base } = await initRepo();
     await seedSuite(repo, base, ["t1"]);

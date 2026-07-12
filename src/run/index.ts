@@ -27,7 +27,7 @@ import {
   type Task,
 } from "../core/index.ts";
 import { selectAdapter } from "./adapters/index.ts";
-import { runOneAttempt } from "./attempt.ts";
+import { runOneAttempt, type AttemptEnv } from "./attempt.ts";
 import { defaultConcurrency, mapLimit } from "./pool.ts";
 
 /** One unit of work: a (task, attempt-number) pair the pool will execute. */
@@ -66,10 +66,12 @@ export async function runRun(opts: {
     return fail(json, `invalid run config: ${(err as Error).message}`, EXIT.FAILURE);
   }
 
-  // Target-repo config gives us the monorepo subdir (the agent's cwd).
-  let subdir: string | undefined;
+  // The target-repo config gives the agent's environment: the package root (its
+  // cwd), how to install deps, and the install timeout (reuse the verifier one).
+  let env: AttemptEnv;
   try {
-    subdir = (await readConfig(repoRoot)).subdir;
+    const cfg = await readConfig(repoRoot);
+    env = { subdir: cfg.subdir, setupCmd: cfg.setupCmd, setupTimeoutMs: cfg.verifierTimeoutMs };
   } catch (err) {
     return fail(json, `cannot read target config: ${(err as Error).message}`, EXIT.FAILURE);
   }
@@ -126,7 +128,7 @@ export async function runRun(opts: {
     // runOneAttempt records a crashed attempt rather than throwing, but guard
     // anyway so one unexpected error can't abort the whole pool.
     try {
-      return await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, subdir);
+      return await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, env);
     } catch {
       return null;
     }

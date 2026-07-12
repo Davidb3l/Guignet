@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import {
   captureWorktreeDiff,
+  runShell,
   transcriptDir as transcriptDirFor,
   writeAttempt,
   writeSolutionDiff,
@@ -21,6 +22,14 @@ import {
 } from "../core/index.ts";
 import type { Adapter } from "./adapters/types.ts";
 import { safeWorktreeAdd, safeWorktreeRemove } from "./worktree.ts";
+
+/** The target-repo environment an attempt needs: where the package root is,
+ * how to install its deps, and how long to allow for that. */
+export interface AttemptEnv {
+  subdir?: string;
+  setupCmd?: string;
+  setupTimeoutMs: number;
+}
 
 /** Milliseconds elapsed, measured by the runner (never trusting the adapter). */
 function nowMs(): number {
@@ -39,13 +48,14 @@ export async function runOneAttempt(
   adapter: Adapter,
   task: Task,
   attemptNum: number,
-  subdir?: string,
+  env: AttemptEnv,
 ): Promise<Attempt> {
   const tDir = transcriptDirFor(repoRoot, runConfig.runId, task.id, attemptNum);
   await mkdir(tDir, { recursive: true });
 
   const tmp = await mkdtemp(join(tmpdir(), "guignet-run-"));
   const worktreeDir = join(tmp, "wt");
+  const worktreeSubdir = env.subdir ? join(worktreeDir, env.subdir) : worktreeDir;
 
   const record = async (
     exit: Attempt["exit"],
@@ -67,14 +77,23 @@ export async function runOneAttempt(
       return await record("crashed", "", null, null, 0);
     }
 
+    // Give the agent the environment a developer starts from — deps installed —
+    // so it can resolve imports and run tests. Best-effort: if setup fails, we
+    // proceed with a bare worktree (the agent may still fix by reasoning; score
+    // verifies either way). Setup is env prep, NOT agent work, so it runs BEFORE
+    // the wall-clock starts and its time never counts against the agent.
+    if (env.setupCmd) {
+      await runShell(env.setupCmd, { cwd: worktreeSubdir, timeoutMs: env.setupTimeoutMs });
+    }
+
     // wall-clock brackets ONLY the agent run (§5 — the runner's measure of the
-    // agent), not the surrounding git worktree/diff/cost overhead.
+    // agent), not the surrounding git worktree/setup/diff/cost overhead.
     const agentStart = nowMs();
     const { exit } = await adapter.attempt({
       prompt: task.prompt,
       // The agent's cwd is the monorepo package root (§3) when a subdir is set;
       // the diff is still captured at the worktree root, where git lives.
-      worktreePath: subdir ? join(worktreeDir, subdir) : worktreeDir,
+      worktreePath: worktreeSubdir,
       transcriptDir: tDir,
       model: runConfig.model,
       budget: runConfig.budgets ?? {},
