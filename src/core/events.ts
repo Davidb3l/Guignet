@@ -17,7 +17,7 @@
  *   - "auto" (default): emit only if `<repo>/.suite/` already exists.
  *   - "on":  always emit (creates `.suite/` if needed).
  *   - "off": never emit.
- * Wiring these emissions into the stages is an M4 task; the mechanism ships now.
+ * The stages (mine/gate/run/report) call `emitEvent` after their durable writes.
  */
 import { existsSync } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";

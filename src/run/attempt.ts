@@ -85,13 +85,18 @@ export async function runOneAttempt(
     // the wall-clock starts and its time never counts against the agent.
     if (env.setupCmd) {
       await runShell(env.setupCmd, { cwd: worktreeSubdir, timeoutMs: env.setupTimeoutMs });
-      // Setup (e.g. `bun install`) can modify TRACKED files — most commonly a
-      // lockfile (bun.lockb, yarn.lock). Revert tracked changes so the captured
-      // solution diff reflects ONLY the agent's work, not install churn (which
-      // would otherwise pollute the diff and, for a binary lockfile, break the
-      // apply at score time). Untracked installs (node_modules) are kept — that
-      // is the whole point of running setup.
-      await git(["checkout", "--", "."], worktreeDir);
+      // Baseline EVERYTHING setup did — modified tracked files (lockfiles) AND
+      // untracked artifacts it wrote (a gitignored-elsewhere lockfile, codegen) —
+      // into a throwaway commit, so the captured solution diff is the agent's
+      // delta ALONE, not install churn. `git add -A` respects .gitignore, so
+      // node_modules and friends stay uncommitted and available to the agent.
+      // Reverting only tracked files (an earlier approach) missed untracked churn.
+      await git(["add", "-A"], worktreeDir);
+      await git(
+        ["-c", "user.name=guignet", "-c", "user.email=guignet@local", "-c", "commit.gpgsign=false",
+         "commit", "--no-verify", "--allow-empty", "-m", "guignet:post-setup baseline"],
+        worktreeDir,
+      );
     }
 
     // wall-clock brackets ONLY the agent run (§5 — the runner's measure of the
