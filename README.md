@@ -50,10 +50,13 @@ A benchmark run is background work, and Guignet treats your machine that way:
 every subprocess it spawns — agents, installs, verifiers — runs at reduced
 scheduling priority (`taskpolicy -c utility` on macOS, `nice` on Linux;
 unchanged on other platforms), so your foreground always wins under
-contention. The run pool is load-aware: it adds concurrency only while the
-machine has headroom, and degrades to sequential progress (never a stall,
-never a freeze) when it doesn't. Runs are resumable, so interrupting one
-costs nothing.
+contention. The run pool is host-aware on two kernel signals — CPU load
+average and the kernel's own memory-pressure verdict
+(`kern.memorystatus_vm_pressure_level` on macOS, PSI on Linux): it adds
+concurrency only while the machine has headroom on both, starts narrower on
+an already-strained machine, and degrades to sequential progress (never a
+stall, never a freeze) under saturation. Runs are resumable, so interrupting
+one costs nothing.
 
 Low priority is also what gets starved on a busy machine, so a verifier could
 time out under contention where it would have passed — `score` therefore

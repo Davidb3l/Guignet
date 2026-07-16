@@ -20,6 +20,7 @@ function probe(over: Partial<Record<keyof HostProbe, unknown>>): HostProbe {
     cores: () => 8,
     platform: () => "darwin" as NodeJS.Platform,
     hasTaskpolicy: () => true,
+    memPressure: () => "normal" as const,
     ...(over as Partial<HostProbe>),
   };
 }
@@ -58,6 +59,12 @@ describe("waitForHeadroom", () => {
     await waitForHeadroom({ maxLoadPerCore: 1.5, active: () => others, probe: probe({ load1: () => 999 }), sleepMs: 5 });
     expect(others).toBe(0);
   });
+  test("kernel memory pressure holds extra concurrency even when CPU load is fine", async () => {
+    let mem: "normal" | "warn" = "warn";
+    setTimeout(() => (mem = "normal"), 30);
+    await waitForHeadroom({ maxLoadPerCore: 1.5, active: () => 1, probe: probe({ memPressure: () => mem }), sleepMs: 5 });
+    expect(mem as string).toBe("normal"); // resolved only after pressure lifted
+  });
 });
 
 describe("defaultConcurrency (load-aware)", () => {
@@ -68,6 +75,16 @@ describe("defaultConcurrency (load-aware)", () => {
   test("a busy machine gets a smaller pool, floored at 1", () => {
     expect(defaultConcurrency(probe({ cores: () => 10, load1: () => 4 }))).toBe(2); // 4 - floor(4/2)
     expect(defaultConcurrency(probe({ cores: () => 10, load1: () => 22 }))).toBe(1); // never 0
+  });
+  test("memory pressure shrinks the pool: warn halves, critical forces 1", () => {
+    expect(defaultConcurrency(probe({ cores: () => 10, memPressure: () => "warn" }))).toBe(2); // 4 → 2
+    expect(defaultConcurrency(probe({ cores: () => 10, memPressure: () => "critical" }))).toBe(1);
+  });
+  test("the real probe reports a valid pressure level on this machine", () => {
+    // Smoke: whatever the level is right now, it must be one of the tri-state
+    // values and must not throw (fail-open contract).
+    const { realHost } = require("../src/core/host.ts") as typeof import("../src/core/host.ts");
+    expect(["normal", "warn", "critical"]).toContain(realHost.memPressure());
   });
 });
 

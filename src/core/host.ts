@@ -26,18 +26,25 @@
  *    The count deliberately excludes units parked in admission — counting
  *    them deadlocks the pool once every puller parks (see run/pool.ts).
  *
- * Load average is the whole signal on purpose: it is portable, cheap, and
- * captures CPU pressure from OTHER processes too (the freeze had Docker
- * burning 5 cores before Guignet added a single process). Memory pressure is
- * deliberately not probed in v0 — `os.freemem()` is misleading on macOS
- * (purgeable/inactive pages read as "used") and a wrong number is worse than
- * none. The priority clamp is the memory story's mitigation for now: a
- * swapping foreground app still schedules ahead of us.
+ * Both pressure signals are read from the kernel's own accounting, never
+ * derived: load average for CPU (portable, and it sees OTHER processes too —
+ * the freeze had Docker burning 5 cores before Guignet added a single
+ * process), and for memory the kernel's pressure verdict itself — macOS
+ * `kern.memorystatus_vm_pressure_level` (the tri-state memorystatus uses to
+ * decide jetsam), Linux PSI (`/proc/pressure/memory`, stall-time share).
+ * `os.freemem()` is deliberately NOT used: on macOS it counts purgeable/
+ * inactive pages as "used", and a wrong number is worse than none. A probe
+ * that errors reports "normal" (fail-open): a broken probe must not stall a
+ * run, and the load gate still stands on its own.
  */
+import { readFileSync } from "node:fs";
 import { availableParallelism, loadavg, platform } from "node:os";
 
 /** What the admission/priority decisions read from the machine. Injectable so
  * tests can simulate any host without loading a real one. */
+/** The kernel's memory-pressure verdict, coarsened to what admission needs. */
+export type MemPressure = "normal" | "warn" | "critical";
+
 export interface HostProbe {
   /** 1-minute load average. */
   load1(): number;
@@ -46,6 +53,24 @@ export interface HostProbe {
   platform(): NodeJS.Platform;
   /** Is `taskpolicy` on PATH? (macOS QoS clamp; absent on other platforms.) */
   hasTaskpolicy(): boolean;
+  /** The kernel's memory-pressure level; "normal" when there is no signal. */
+  memPressure(): MemPressure;
+}
+
+/** macOS: the memorystatus pressure level (1 normal / 2 warn / 4 critical) —
+ * the same tri-state the kernel uses to decide jetsam. ~1ms sysctl spawn. */
+function darwinMemPressure(): MemPressure {
+  const out = Bun.spawnSync(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).stdout.toString();
+  const level = Number.parseInt(out, 10);
+  return level >= 4 ? "critical" : level >= 2 ? "warn" : "normal";
+}
+
+/** Linux: PSI — the share of the last 10s that SOME task stalled on memory.
+ * A plain file read; ≥10% is real pressure, ≥50% is thrashing. */
+function linuxMemPressure(): MemPressure {
+  const some = readFileSync("/proc/pressure/memory", "utf-8").match(/^some avg10=([\d.]+)/);
+  const pct = some ? Number.parseFloat(some[1]!) : 0;
+  return pct >= 50 ? "critical" : pct >= 10 ? "warn" : "normal";
 }
 
 /** The real machine. `hasTaskpolicy` is memoized — PATH doesn't change mid-run. */
@@ -55,6 +80,15 @@ export const realHost: HostProbe = {
   cores: () => Math.max(1, availableParallelism()),
   platform: () => platform(),
   hasTaskpolicy: () => (taskpolicyMemo ??= Bun.which("taskpolicy") !== null),
+  memPressure: () => {
+    try {
+      if (platform() === "darwin") return darwinMemPressure();
+      if (platform() === "linux") return linuxMemPressure();
+    } catch {
+      /* fail-open below */
+    }
+    return "normal"; // no signal (or a broken probe) must never stall a run
+  },
 };
 
 export type SpawnPriority = "low" | "normal";
@@ -108,12 +142,20 @@ export async function waitForHeadroom(opts: HeadroomOptions): Promise<void> {
   const sleepMs = opts.sleepMs ?? 1_000;
   const threshold = opts.maxLoadPerCore * probe.cores();
   let sinceLogMs = Infinity; // fire the first message immediately
-  while (opts.active() > 0 && probe.load1() > threshold) {
+  // CPU saturation OR kernel-reported memory pressure holds extra concurrency
+  // — an agent attempt costs ~1 GB+, and admitting into "warn" is how a 16 GB
+  // machine ends up swapping its user's foreground.
+  const busy = (): string | null => {
+    if (probe.load1() > threshold)
+      return `load ${probe.load1().toFixed(1)} > ${threshold.toFixed(1)} on ${probe.cores()} cores`;
+    const mem = probe.memPressure();
+    return mem === "normal" ? null : `memory pressure ${mem}`;
+  };
+  let reason: string | null;
+  while (opts.active() > 0 && (reason = busy()) !== null) {
     if (opts.onWait && sinceLogMs >= 60_000) {
       sinceLogMs = 0;
-      opts.onWait(
-        `host is busy (load ${probe.load1().toFixed(1)} > ${threshold.toFixed(1)} on ${probe.cores()} cores) — holding extra concurrency while ${opts.active()} unit(s) run`,
-      );
+      opts.onWait(`host is busy (${reason}) — holding extra concurrency while ${opts.active()} unit(s) run`);
     }
     await new Promise((r) => setTimeout(r, sleepMs));
     sinceLogMs += sleepMs;
@@ -121,14 +163,19 @@ export async function waitForHeadroom(opts: HeadroomOptions): Promise<void> {
 }
 
 /**
- * The default pool width, load-aware: min(4, floor(cores/2)) as before, MINUS
+ * The default pool width, host-aware: min(4, floor(cores/2)) as before, MINUS
  * the cores other processes are already using (floor(load1/2) — halved so a
- * transient spike doesn't zero the pool), floored at 1. A machine already
- * half-busy gets a smaller pool from the start instead of discovering
- * saturation mid-run.
+ * transient spike doesn't zero the pool), then halved under memory-pressure
+ * "warn" and forced to 1 under "critical" (each agent attempt costs ~1 GB+;
+ * starting wide into pressure is the swap-death vector). Floored at 1. A
+ * machine already strained gets a smaller pool from the start instead of
+ * discovering saturation mid-run.
  */
 export function defaultConcurrency(probe: HostProbe = realHost): number {
+  const mem = probe.memPressure();
+  if (mem === "critical") return 1;
   const idleDefault = Math.min(4, Math.floor(probe.cores() / 2));
   const busyCores = Math.floor(probe.load1() / 2);
-  return Math.max(1, idleDefault - busyCores);
+  const width = Math.max(1, idleDefault - busyCores);
+  return mem === "warn" ? Math.max(1, Math.floor(width / 2)) : width;
 }
