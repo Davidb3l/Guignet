@@ -116,7 +116,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
 
     // Setup once — the worktree didn't inherit the repo's node_modules.
     if (config.setupCmd) {
-      const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs });
+      const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
       if (setup.timedOut) return verdict(false, 0, 0, "setup timed out");
       if (setup.code !== 0) return verdict(false, 0, 0, `setup failed: ${snippet(setup.stderr || setup.stdout)}`);
     }
@@ -128,7 +128,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
       await resetWorktree(worktreeDir);
       const applied = await applyDiff(worktreeDir, truth.verifierDiff);
       if (!applied.ok) return verdict(false, failAtBase, 0, `git apply failed for verifier diff: ${snippet(applied.stderr)}`);
-      const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs });
+      const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
       if (r.timedOut) return verdict(false, failAtBase, 0, "verifier timed out at base");
       // A null exit code means the process was killed/crashed by signal (OOM,
       // spawn failure) — an ENVIRONMENT problem, NOT the held-out test detecting
@@ -149,7 +149,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
       if (!v.ok) return verdict(false, failAtBase, passAtFix, `git apply failed for verifier diff: ${snippet(v.stderr)}`);
       const f = await applyDiff(worktreeDir, truth.fixDiff);
       if (!f.ok) return verdict(false, failAtBase, passAtFix, `git apply failed for fix diff: ${snippet(f.stderr)}`);
-      const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs });
+      const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
       if (r.timedOut) return verdict(false, failAtBase, passAtFix, "verifier timed out at fix");
       if (r.code === null) return verdict(false, failAtBase, passAtFix, "verifier could not run at fix (killed/crashed)");
       if (r.code === 0) passAtFix++;

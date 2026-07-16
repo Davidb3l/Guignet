@@ -18,10 +18,12 @@ import {
   RunConfigSchema,
   attemptExists,
   emitEvent,
+  git,
   readConfig,
   readSuite,
   readTask,
   uri,
+  waitForHeadroom,
   writeRunConfig,
   type ExitCode,
   type RunConfig,
@@ -73,13 +75,26 @@ export async function runRun(opts: {
   // cwd), how to install deps, and the install timeout (reuse the verifier one).
   let env: AttemptEnv;
   let spine: SpineSetting;
+  let host: { priority: "low" | "normal"; maxLoadPerCore: number };
   try {
     const cfg = await readConfig(repoRoot);
-    env = { subdir: cfg.subdir, setupCmd: cfg.setupCmd, setupTimeoutMs: cfg.verifierTimeoutMs, testCwd: cfg.testCwd };
+    env = {
+      subdir: cfg.subdir,
+      setupCmd: cfg.setupCmd,
+      setupTimeoutMs: cfg.verifierTimeoutMs,
+      testCwd: cfg.testCwd,
+      priority: cfg.host.priority,
+    };
     spine = cfg.spine;
+    host = cfg.host;
   } catch (err) {
     return fail(json, `cannot read target config: ${(err as Error).message}`, EXIT.FAILURE);
   }
+
+  // Crash hygiene: a previous run killed mid-flight (or a frozen machine's
+  // hard reboot) leaves registered-but-deleted worktrees behind; prune them
+  // before creating new ones so the registry can't accrete garbage.
+  await git(["worktree", "prune"], repoRoot).catch(() => {});
 
   // The admitted suite — gate must have run.
   let taskIds: string[];
@@ -129,15 +144,27 @@ export async function runRun(opts: {
   const concurrency = runConfig.maxConcurrency ?? defaultConcurrency();
   const result: RunResult = { runId: runConfig.runId, attempted: 0, skipped, byExit: {}, dollars: null };
 
-  const attempts = await mapLimit(units, concurrency, async (u) => {
-    // runOneAttempt records a crashed attempt rather than throwing, but guard
-    // anyway so one unexpected error can't abort the whole pool.
-    try {
-      return await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, env);
-    } catch {
-      return null;
-    }
-  });
+  const attempts = await mapLimit(
+    units,
+    concurrency,
+    async (u) => {
+      // runOneAttempt records a crashed attempt rather than throwing, but guard
+      // anyway so one unexpected error can't abort the whole pool.
+      try {
+        return await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, env);
+      } catch {
+        return null;
+      }
+    },
+    // Host-citizenship admission (core/host.ts): hold ADDITIONAL concurrency
+    // while the machine is saturated; the first unit always proceeds.
+    (others) =>
+      waitForHeadroom({
+        maxLoadPerCore: host.maxLoadPerCore,
+        active: others,
+        onWait: (msg) => process.stderr.write(`run: ${msg}\n`),
+      }),
+  );
 
   for (const att of attempts) {
     if (!att) continue;

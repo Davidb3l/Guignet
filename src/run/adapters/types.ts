@@ -29,6 +29,9 @@ export interface AttemptInput {
   /** Per-attempt budget. `maxSeconds` is the wall-clock kill; the rest are
    * adapter-dependent (recorded even when not hard-enforceable). */
   budget: { maxTokens?: number; maxSeconds?: number; maxDollars?: number };
+  /** Scheduling priority for the agent process (core/host.ts). Adapters pass
+   * it straight to spawnToFile. Defaults to "low" when unset. */
+  priority?: "low" | "normal";
 }
 
 export interface AttemptCost {

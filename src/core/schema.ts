@@ -77,6 +77,25 @@ export const ConfigSchema = z.object({
     })
     .optional(),
   /**
+   * Host citizenship (core/host.ts): Guignet is a background workload and must
+   * never take the machine away from its user — the v0 dogfoods froze a 16 GB
+   * laptop before these existed.
+   * - `priority`: scheduling priority for EVERY spawned subprocess (agents,
+   *   installs, verifiers). "low" (default) = macOS `taskpolicy -c utility` /
+   *   `nice -n 10` elsewhere — the user's foreground always wins under
+   *   contention, near-zero cost on an idle machine. "normal" opts out.
+   * - `maxLoadPerCore`: the run pool admits an ADDITIONAL concurrent attempt
+   *   only while load1 ≤ maxLoadPerCore × cores (progress guarantee: the
+   *   first unit always runs, so a busy host degrades to sequential, never
+   *   stalls). Default 1.5.
+   */
+  host: z
+    .object({
+      priority: z.enum(["low", "normal"]).default("low"),
+      maxLoadPerCore: z.number().positive().default(1.5),
+    })
+    .default({}),
+  /**
    * Suite event-spine emission (SUITE_CONTRACTS §2 + ARCHITECTURE.md §13).
    * "auto" (default) emits only when the target repo already has `.suite/`, so
    * Guignet never introduces that directory into a client repo. "on"/"off"

@@ -15,6 +15,7 @@
 import {
   EXIT,
   emitEvent,
+  git,
   listTaskIds,
   readCandidateLog,
   readConfig,
@@ -96,6 +97,10 @@ export async function runGate(opts: { repoRoot: string; json: boolean; force: bo
   } catch (err) {
     return { stdout: "", stderr: `gate: cannot read config: ${(err as Error).message}\n`, code: EXIT.FAILURE };
   }
+
+  // Crash hygiene: prune worktrees a killed/frozen previous run left registered
+  // (their temp dirs are gone; the registry entries would accrete forever).
+  await git(["worktree", "prune"], repoRoot).catch(() => {});
 
   const taskIds = await listTaskIds(repoRoot);
   if (taskIds.length === 0) {

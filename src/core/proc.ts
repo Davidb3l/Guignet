@@ -8,7 +8,12 @@
  * behaves exactly as it would in the user's shell. Output is buffered — fine
  * for test runs; M2's agent supervision will stream to a file instead (agent
  * logs are large and long-lived; test output is small and short).
+ *
+ * Everything spawned here runs at LOW scheduling priority by default
+ * (core/host.ts): benchmark work is background work, and it must never take
+ * the machine away from the user running it.
  */
+import { buildPriorityArgv, type SpawnPriority } from "./host.ts";
 
 export interface ShellResult {
   /** Exit code, or null if the process was killed (timeout/signal). */
@@ -25,6 +30,10 @@ export interface ShellOptions {
   timeoutMs?: number;
   /** Extra env vars, merged over the current environment. */
   env?: Record<string, string>;
+  /** Scheduling priority (core/host.ts). Default "low": Guignet's spawns are
+   * background work and must yield to the user's foreground under contention.
+   * "normal" opts out (config `host.priority`). */
+  priority?: SpawnPriority;
 }
 
 export interface SpawnToFileOptions {
@@ -36,6 +45,8 @@ export interface SpawnToFileOptions {
   /** Wall-clock limit; on expiry the process is SIGKILLed. Omit for no limit. */
   timeoutMs?: number;
   env?: Record<string, string>;
+  /** Scheduling priority (core/host.ts). Default "low" — see ShellOptions. */
+  priority?: SpawnPriority;
 }
 
 /**
@@ -66,7 +77,7 @@ export async function spawnToFile(
 
   let proc: Bun.Subprocess<"ignore", number, number>;
   try {
-    proc = Bun.spawn(argv, {
+    proc = Bun.spawn(buildPriorityArgv(argv, opts.priority ?? "low"), {
       cwd: opts.cwd,
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
       stdin: "ignore",
@@ -148,7 +159,7 @@ function collectDescendants(root: number): number[] {
 export async function runShell(cmd: string, opts: ShellOptions): Promise<ShellResult> {
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    proc = Bun.spawn(["sh", "-c", cmd], {
+    proc = Bun.spawn(buildPriorityArgv(["sh", "-c", cmd], opts.priority ?? "low"), {
       cwd: opts.cwd,
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
       stdin: "ignore",

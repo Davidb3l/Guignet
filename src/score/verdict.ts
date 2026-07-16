@@ -203,7 +203,7 @@ export async function replayVerdict(
     // failing means we can't stand the environment up to judge the solution, so
     // the attempt is un-scoreable ⇒ passed:false (fail-safe direction).
     if (config.setupCmd) {
-      const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs });
+      const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
       if (setup.timedOut) return { verdict: verdict(false), note: "setup timed out" };
       if (setup.code !== 0) return { verdict: verdict(false), note: `setup failed: ${snippet(setup.stderr || setup.stdout)}` };
     }
@@ -235,7 +235,24 @@ export async function replayVerdict(
     // The primary verdict: run the held-out verifier. Pass iff it exits 0 within
     // the timeout. A timeout or a null exit (killed/crashed — an environment
     // problem, not a passing test) is NOT a pass.
-    const r = await runShell(task.verifierCmd, { cwd: execCwd, timeoutMs });
+    let r = await runShell(task.verifierCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
+    if (r.timedOut && config.host.priority === "low") {
+      // A verifier at low priority is exactly what gets starved on a contended
+      // host — and a starved timeout here would score a CORRECT fix as a
+      // failure, biasing model scores by how busy the machine happened to be
+      // ("judge the fix, not the machine"). Retry ONCE at normal priority:
+      // still fail-safe (a genuine hang times out again; only a real pass can
+      // flip the verdict), and brief enough not to defeat host citizenship.
+      await resetWorktree(worktreeDir);
+      const sol2 = await applyDiff(worktreeDir, judged.kept);
+      const ver2 = sol2.ok ? await applyDiff(worktreeDir, truth.verifierDiff) : sol2;
+      if (!ver2.ok) return { verdict: verdict(false), note: withFilter("verifier timed out (low priority); state could not be rebuilt for the normal-priority retry") };
+      r = await runShell(task.verifierCmd, { cwd: execCwd, timeoutMs, priority: "normal" });
+      if (!r.timedOut) {
+        const passed2 = r.code === 0;
+        return { verdict: verdict(passed2), note: withFilter(passed2 ? "passed on normal-priority retry after a low-priority timeout" : `verifier failed (exit ${r.code}) on normal-priority retry`) };
+      }
+    }
     if (r.timedOut) return { verdict: verdict(false), note: withFilter("verifier timed out") };
     if (r.code === null) return { verdict: verdict(false), note: withFilter("verifier could not run (killed/crashed)") };
     const passed = r.code === 0;

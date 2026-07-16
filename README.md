@@ -44,6 +44,25 @@ CLI contracts are stable, hardening continues.
 
 See [`METHODOLOGY.md`](METHODOLOGY.md) for the full method and its honest limits.
 
+## Host citizenship
+
+A benchmark run is background work, and Guignet treats your machine that way:
+every subprocess it spawns — agents, installs, verifiers — runs at reduced
+scheduling priority (`taskpolicy -c utility` on macOS, `nice` on Linux;
+unchanged on other platforms), so your foreground always wins under
+contention. The run pool is load-aware: it adds concurrency only while the
+machine has headroom, and degrades to sequential progress (never a stall,
+never a freeze) when it doesn't. Runs are resumable, so interrupting one
+costs nothing.
+
+Low priority is also what gets starved on a busy machine, so a verifier could
+time out under contention where it would have passed — `score` therefore
+retries a timed-out verifier once at normal priority before recording a
+failure (a genuine hang still times out; only a real pass can flip the
+verdict). `gate` stays conservative: a timeout there discards the task, which
+is fail-safe. Opt out of all of it with `host.priority: "normal"` if you're
+benchmarking on a dedicated box and want every cycle.
+
 ## Requirements
 
 [Bun](https://bun.sh) ≥ 1.3 and `git`. No npm/node/pnpm.
@@ -90,6 +109,9 @@ Every command accepts `--json` (exactly one JSON object on stdout). Exit codes:
 | `repoVisibility` | `public` / `private` / `mixed` / `unknown` — frames the cutoff split (contamination vs knowledge-freshness) |
 | `cutoffs` | per-model training-cutoff overrides (ISO dates) |
 | `gateReplays` | validity replay count `k` (default 2) |
+| `testCwd` | where setup/verifier/agent run: `subdir` (default) or `repo` — use `repo` for workspace test runners (vitest `projects`, pnpm/nx) that must execute at the repo root |
+| `host.priority` | scheduling priority for all spawned work: `low` (default — yields to your foreground) / `normal` |
+| `host.maxLoadPerCore` | run-pool admission threshold: add concurrency only while load1 ≤ this × cores (default 1.5) |
 | `spine` | suite event emission: `auto` (default, only if `.suite/` exists) / `on` / `off` |
 
 ## Development

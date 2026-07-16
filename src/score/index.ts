@@ -19,6 +19,7 @@
 import {
   EXIT,
   classifyEra,
+  git,
   listRunAttempts,
   listRuns,
   loadCutoffRegistry,
@@ -159,6 +160,10 @@ export async function runScore(opts: { repoRoot: string; json: boolean; force: b
   } catch (err) {
     return { stdout: "", stderr: `score: cannot read config: ${(err as Error).message}\n`, code: EXIT.FAILURE };
   }
+
+  // Crash hygiene: prune worktrees a killed/frozen previous run left registered
+  // (their temp dirs are gone; the registry entries would accrete forever).
+  await git(["worktree", "prune"], repoRoot).catch(() => {});
 
   // Which runs to score. An explicit runId that can't be read is a hard error
   // (the user named a run that isn't there); the all-runs path soft-blocks on

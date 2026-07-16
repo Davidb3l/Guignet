@@ -35,6 +35,9 @@ export interface AttemptEnv {
    * worktree root even with a `subdir` set — for workspace test runners that
    * must execute at the root. Defaults to "subdir" when unset. */
   testCwd?: "subdir" | "repo";
+  /** Scheduling priority for setup + the agent (config `host.priority`,
+   * core/host.ts). Defaults to "low" — benchmark work yields to the user. */
+  priority?: "low" | "normal";
 }
 
 /** Milliseconds elapsed, measured by the runner (never trusting the adapter). */
@@ -102,7 +105,7 @@ export async function runOneAttempt(
     // verifies either way). Setup is env prep, NOT agent work, so it runs BEFORE
     // the wall-clock starts and its time never counts against the agent.
     if (env.setupCmd) {
-      await runShell(env.setupCmd, { cwd: execCwd, timeoutMs: env.setupTimeoutMs });
+      await runShell(env.setupCmd, { cwd: execCwd, timeoutMs: env.setupTimeoutMs, priority: env.priority });
       // Baseline EVERYTHING setup did — modified tracked files (lockfiles) AND
       // untracked artifacts it wrote (a gitignored-elsewhere lockfile, codegen) —
       // into a throwaway commit, so the captured solution diff is the agent's
@@ -129,6 +132,7 @@ export async function runOneAttempt(
       transcriptDir: tDir,
       model: runConfig.model,
       budget: runConfig.budgets ?? {},
+      priority: env.priority,
     });
     const wallclockMs = nowMs() - agentStart;
 

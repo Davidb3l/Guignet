@@ -116,6 +116,7 @@ export async function attempt(input: AttemptInput): Promise<{ exit: AttemptExit 
     stdoutPath: join(input.transcriptDir, RESULT_FILE),
     stderrPath: join(input.transcriptDir, STDERR_FILE),
     timeoutMs,
+    priority: input.priority,
   });
 
   if (timedOut) return { exit: "budget-exhausted" };

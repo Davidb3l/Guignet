@@ -163,9 +163,12 @@ async function seedSuite(repo: string, base: string, ids: string[]): Promise<voi
   for (const id of ids) await writeTask(repo, makeTask(id, base));
 }
 
+// maxConcurrency is PINNED so tests never depend on the real machine's load
+// (defaultConcurrency is load-aware; a busy CI box would otherwise vary the
+// pool width — harmless in prod, nondeterministic in a test).
 async function writeRunCfg(repo: string, cmd: string, nAttempts: number): Promise<string> {
   const path = join(repo, "run-config.json");
-  await writeFile(path, JSON.stringify({ runId: "2026-07-11-mock", adapter: "generic-cli", nAttempts, genericCli: { cmd } }));
+  await writeFile(path, JSON.stringify({ runId: "2026-07-11-mock", adapter: "generic-cli", nAttempts, genericCli: { cmd }, maxConcurrency: 2 }));
   return path;
 }
 

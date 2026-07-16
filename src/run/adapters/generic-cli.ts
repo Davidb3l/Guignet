@@ -54,6 +54,7 @@ export function makeGenericCliAdapter(cmdTemplate: string): Adapter {
         stderrPath: `${input.transcriptDir}/stderr.log`,
         timeoutMs,
         env: { GUIGNET_PROMPT: input.prompt, GUIGNET_WORKTREE: input.worktreePath },
+        priority: input.priority,
       });
       if (timedOut) return { exit: "budget-exhausted" };
       if (code !== 0) return { exit: "crashed" };

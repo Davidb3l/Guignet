@@ -428,6 +428,50 @@ describe("score verdict", () => {
     expect(v.testEditsFiltered).toBe(false);
   });
 
+  test("(p) a verifier starved at low priority is retried once at normal priority — a correct fix passes", async () => {
+    // Host citizenship runs verifiers at low scheduling priority, which is what
+    // gets starved on a contended machine. A starved TIMEOUT must not score a
+    // correct fix as a failure ("judge the fix, not the machine"): score retries
+    // once at normal priority. Simulated deterministically: the verifier sleeps
+    // past verifierTimeoutMs on its FIRST invocation (marker file outside the
+    // worktree — resetWorktree wipes the worktree, not the test tmpdir) and
+    // runs the real assertion on the second.
+    const s = await scaffold();
+    const marker = join(await tmp(), "first-run.marker");
+    const flakyCmd = `if [ ! -f '${marker}' ]; then touch '${marker}'; sleep 30; fi; bun run verifyA.ts`;
+    await writeConfig(
+      s.repo,
+      ConfigSchema.parse({ testCmd: flakyCmd, cutoffs: { [MODEL]: CUTOFF }, verifierTimeoutMs: 700 }),
+    );
+    await writeRun(s.repo);
+    await writeTask(s.repo, { ...makeTask("retry", s.base, POST_DATE), verifierCmd: flakyCmd });
+    await writeTruth(s.repo, "retry", { fixDiff: s.fixGood, verifierDiff: s.verifierA });
+    await writeSolutionDiff(s.repo, RUN_ID, "retry", 1, s.fixGood);
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain("normal-priority retry");
+    const v = await readVerdict(s.repo, RUN_ID, "retry", 1);
+    expect(v.passed).toBe(true); // the low-priority timeout did not fail a correct fix
+  });
+
+  test("(q) a verifier that genuinely hangs times out on the retry too and fails", async () => {
+    const s = await scaffold();
+    await writeConfig(
+      s.repo,
+      ConfigSchema.parse({ testCmd: "sleep 30", cutoffs: { [MODEL]: CUTOFF }, verifierTimeoutMs: 400 }),
+    );
+    await writeRun(s.repo);
+    await writeTask(s.repo, { ...makeTask("hang", s.base, POST_DATE), verifierCmd: "sleep 30" });
+    await writeTruth(s.repo, "hang", { fixDiff: s.fixGood, verifierDiff: s.verifierA });
+    await writeSolutionDiff(s.repo, RUN_ID, "hang", 1, s.fixGood);
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(0);
+    const v = await readVerdict(s.repo, RUN_ID, "hang", 1);
+    expect(v.passed).toBe(false); // fail-safe: the retry only rescues real passes
+  });
+
   test("(j) under --json, stdout is exactly one JSON object (logs go to stderr)", async () => {
     const s = await scaffold();
     await writeScoreConfig(s.repo);

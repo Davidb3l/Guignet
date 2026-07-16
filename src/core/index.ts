@@ -12,5 +12,6 @@ export * from "./store.ts";
 export * from "./events.ts";
 export * from "./git.ts";
 export * from "./classify.ts";
+export * from "./host.ts";
 export * from "./proc.ts";
 export * from "./cutoffs.ts";
