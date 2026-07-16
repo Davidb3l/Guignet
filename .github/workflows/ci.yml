@@ -7,7 +7,10 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -16,3 +19,20 @@ jobs:
       - run: bun install --frozen-lockfile
       # typecheck + import-boundary (leak firewall) + tests, in one gate.
       - run: bun run check
+
+  # Native Windows is EXPERIMENTAL (see README "Platforms"): this job proves
+  # the toolchain + platform-agnostic core run natively (typecheck, host
+  # citizenship, ids, store). The full suite still assumes POSIX in its test
+  # fixtures (sh-isms like `sleep`/`mkdir -p`); graduating this job to
+  # `bun run check` is the gate for ever calling native Windows supported.
+  windows-core:
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test tests/host.test.ts tests/ids.test.ts tests/store.test.ts tests/doctor.test.ts

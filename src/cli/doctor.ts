@@ -44,6 +44,8 @@ export interface DoctorEnv {
   gitAvailable: boolean;
   /** Whether `cwd` is inside a git work tree (probed by the caller). */
   isGitRepo: boolean;
+  /** Host platform; defaults to process.platform. Injectable for tests. */
+  platform?: NodeJS.Platform;
 }
 
 export interface DoctorReport {
@@ -92,6 +94,22 @@ export async function collectReport(env: DoctorEnv): Promise<DoctorReport> {
     detail: env.isGitRepo ? `${env.cwd} is a git work tree` : `${env.cwd} is not a git repo — nothing to benchmark here`,
     gating: false,
   });
+
+  // Native Windows is EXPERIMENTAL: priority demotion and the memory gate are
+  // best-effort (direct-child priority class, freemem ratio), the CPU load
+  // gate is unavailable by construction (os.loadavg is zero on win32), and the
+  // pipeline is not yet exercised by Windows CI. WSL2 reports linux and gets
+  // full support. Non-gating — the tool still runs — but the user deserves to
+  // know before trusting an overnight benchmark to it. Emitted only on win32
+  // so the envelope stays minimal everywhere else (§3.1 present-vs-absent).
+  if ((env.platform ?? process.platform) === "win32") {
+    checks.push({
+      name: "platform",
+      ok: false,
+      detail: "native Windows is experimental (best-effort priority/memory signals; no CPU load gate) — WSL2 recommended for full support",
+      gating: false,
+    });
+  }
 
   const initialized = isInitialized(env.cwd);
   if (!initialized) {

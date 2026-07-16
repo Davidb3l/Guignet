@@ -73,6 +73,17 @@ benchmarking on a dedicated box and want every cycle.
 
 [Bun](https://bun.sh) ≥ 1.3 and `git`. No npm/node/pnpm.
 
+**Platforms.** macOS and Linux are fully supported (that includes Windows via
+WSL2, which is the recommended route on Windows and gets the complete POSIX
+treatment — `nice`, PSI memory pressure, load-average admission). Native
+Windows is **experimental**: the shell (`cmd.exe`), tree-kill (`taskkill /T`),
+priority demotion (BELOW_NORMAL class, direct child), and memory gate
+(available-physical ratio — accurate on Windows) all have native paths, but
+the CPU load gate is unavailable by construction (`os.loadavg()` is zero on
+Windows) and the full pipeline isn't yet exercised by Windows CI beyond a
+core-unit job. `guignet doctor` says this on Windows so nobody finds out
+mid-benchmark.
+
 ## Quickstart
 
 Create `.guignet/config.json` in the target repo:

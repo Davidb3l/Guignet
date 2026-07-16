@@ -42,21 +42,31 @@ import { buildPromptContext, reconstructPrompt } from "./prompt.ts";
 import { buildTaxonomy } from "./taxonomy.ts";
 
 /**
- * POSIX single-quote a shell argument: wrap in `'…'` and escape any embedded
- * quote as `'\''`. Unlike double quotes, this neutralizes `$`, backtick, and
- * `\` too — so a test path containing shell metacharacters can't be expanded or
- * mangled when the verifier runs under `sh -c` (a mangled path would run the
- * wrong scope, or none, and spuriously discard a sound task).
+ * Quote a shell argument for the platform's shell — the one that will run the
+ * verifier (core/proc.ts shellArgv). POSIX: single-quote (neutralizes `$`,
+ * backtick, and `\`, so a metacharacter in a test path can't be expanded or
+ * mangled under `sh -c` — a mangled path would run the wrong scope, or none,
+ * and spuriously discard a sound task); embedded quotes escape as `'\''`.
+ * Windows (cmd.exe): double-quote — single quotes are LITERALS there, and `"`
+ * is an illegal filename character on Windows, so a plain wrap is complete.
+ * The quoting is baked into task.json at mine time, which is one more reason
+ * a mined suite is a same-machine artifact, not a portable one.
  */
-function shQuote(s: string): string {
+function shQuote(s: string, plat: NodeJS.Platform): string {
+  if (plat === "win32") return `"${s}"`;
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Build the verifier command: the repo's test cmd scoped to the changed tests,
  * with paths made relative to `subdir` (the runner's cwd is the subdir). */
-export function buildVerifierCmd(testCmd: string, testPaths: readonly string[], subdir?: string): string {
+export function buildVerifierCmd(
+  testCmd: string,
+  testPaths: readonly string[],
+  subdir?: string,
+  plat: NodeJS.Platform = process.platform,
+): string {
   const rel = testPaths.map((p) => (subdir && p.startsWith(subdir + "/") ? p.slice(subdir.length + 1) : p));
-  return `${testCmd} ${rel.map(shQuote).join(" ")}`;
+  return `${testCmd} ${rel.map((p) => shQuote(p, plat)).join(" ")}`;
 }
 
 interface MineResult {

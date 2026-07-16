@@ -13,7 +13,32 @@
  * (core/host.ts): benchmark work is background work, and it must never take
  * the machine away from the user running it.
  */
-import { buildPriorityArgv, type SpawnPriority } from "./host.ts";
+import { buildPriorityArgv, demotePriority, type SpawnPriority } from "./host.ts";
+
+/**
+ * The platform shell for a command string: `sh -c` on POSIX; on native
+ * Windows, node's full `shell: true` recipe — `%ComSpec% /d /s /c "<cmd>"`
+ * with the command EXPLICITLY quote-wrapped AND the argv spawned verbatim
+ * (`windowsVerbatimArguments`, see `verbatim`). All three parts are load-
+ * bearing: /s strips exactly the outer quote pair we add, and verbatim stops
+ * the spawn layer from MSVCRT-escaping the command's own embedded quotes —
+ * without it, `bun test "tests/x y.test.ts"` reaches cmd.exe as `\"...\"`
+ * (which cmd does not understand) and the workload parses mangled args
+ * (review-caught; the quoted-arg runShell test pins it on the Windows CI
+ * job). Exported for tests: no Windows box in this loop, so the shape is
+ * pinned pure. Windows-native execution is EXPERIMENTAL (see doctor); WSL2
+ * is the supported route and takes the POSIX path.
+ */
+export function shellArgv(cmd: string, plat: NodeJS.Platform = process.platform, env: Record<string, string | undefined> = process.env): string[] {
+  if (plat === "win32") return [env.ComSpec ?? "cmd.exe", "/d", "/s", "/c", `"${cmd}"`];
+  return ["sh", "-c", cmd];
+}
+
+/** Spawn-option companion to shellArgv: pass argv through untouched on
+ * Windows (node does exactly this for `shell: true`). Ignored on POSIX. */
+function verbatim(plat: NodeJS.Platform = process.platform): { windowsVerbatimArguments?: boolean } {
+  return plat === "win32" ? { windowsVerbatimArguments: true } : {};
+}
 
 export interface ShellResult {
   /** Exit code, or null if the process was killed (timeout/signal). */
@@ -47,6 +72,11 @@ export interface SpawnToFileOptions {
   env?: Record<string, string>;
   /** Scheduling priority (core/host.ts). Default "low" — see ShellOptions. */
   priority?: SpawnPriority;
+  /** Windows only: spawn the argv verbatim (no MSVCRT escaping). Set this iff
+   * the argv is a `shellArgv(...)` cmd.exe invocation — node's `shell: true`
+   * contract. Leave unset for real argv arrays (e.g. the claude-code adapter),
+   * where the default escaping is exactly right. Ignored on POSIX. */
+  windowsVerbatimArguments?: boolean;
 }
 
 /**
@@ -83,12 +113,15 @@ export async function spawnToFile(
       stdin: "ignore",
       stdout: outFh.fd,
       stderr: errFh.fd,
+      ...(opts.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
     });
   } catch {
     await outFh.close();
     await errFh.close();
     return { code: null, timedOut: false };
   }
+  // Windows has no exec-in-place wrapper — demote the spawned child directly.
+  if ((opts.priority ?? "low") === "low") demotePriority(proc.pid);
 
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -108,13 +141,29 @@ export async function spawnToFile(
   return { code, timedOut };
 }
 
+/** The Windows tree-kill argv (`taskkill /T` kills the whole descendant tree,
+ * `/F` forcefully — the platform's `ps`-walk-and-SIGKILL equivalent).
+ * Exported for tests: the argv shape is pinned pure, no Windows box needed. */
+export function win32KillArgv(pid: number): string[] {
+  return ["taskkill", "/pid", String(pid), "/T", "/F"];
+}
+
 /**
- * SIGKILL a process and all its descendants (best-effort, portable via `ps`).
- * Bun.spawn doesn't make the child a process-group leader, so a plain
- * `proc.kill` reaps only the immediate child; we snapshot the tree from `ps`
- * and kill every descendant so nothing survives the wall-clock timeout.
+ * Kill a process and all its descendants (best-effort). POSIX: Bun.spawn
+ * doesn't make the child a process-group leader, so a plain `proc.kill`
+ * reaps only the immediate child; we snapshot the tree from `ps` and SIGKILL
+ * every descendant so nothing survives the wall-clock timeout. Windows:
+ * `taskkill /T /F` does the tree walk natively.
  */
 export async function killTree(pid: number): Promise<void> {
+  if (process.platform === "win32") {
+    try {
+      Bun.spawnSync(win32KillArgv(pid));
+    } catch {
+      // taskkill missing/failed — nothing more we can do best-effort.
+    }
+    return;
+  }
   const descendants = collectDescendants(pid);
   // Kill the root first (stop it spawning more), then everything under it.
   for (const p of [pid, ...descendants]) {
@@ -159,17 +208,20 @@ function collectDescendants(root: number): number[] {
 export async function runShell(cmd: string, opts: ShellOptions): Promise<ShellResult> {
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    proc = Bun.spawn(buildPriorityArgv(["sh", "-c", cmd], opts.priority ?? "low"), {
+    proc = Bun.spawn(buildPriorityArgv(shellArgv(cmd), opts.priority ?? "low"), {
       cwd: opts.cwd,
       env: opts.env ? { ...process.env, ...opts.env } : process.env,
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
+      ...verbatim(),
     });
   } catch (err) {
-    // Spawn itself failed (cwd gone, sh missing) — surface as a killed run.
+    // Spawn itself failed (cwd gone, shell missing) — surface as a killed run.
     return { code: null, stdout: "", stderr: (err as Error).message, timedOut: false };
   }
+  // Windows has no exec-in-place wrapper — demote the spawned child directly.
+  if ((opts.priority ?? "low") === "low") demotePriority(proc.pid);
 
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;

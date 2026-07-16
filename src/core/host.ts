@@ -32,13 +32,20 @@
  * process), and for memory the kernel's pressure verdict itself — macOS
  * `kern.memorystatus_vm_pressure_level` (the tri-state memorystatus uses to
  * decide jetsam), Linux PSI (`/proc/pressure/memory`, stall-time share).
- * `os.freemem()` is deliberately NOT used: on macOS it counts purgeable/
- * inactive pages as "used", and a wrong number is worse than none. A probe
+ * `os.freemem()` is deliberately NOT used on macOS: there it counts
+ * purgeable/inactive pages as "used", and a wrong number is worse than none
+ * (on Windows it IS the accurate native signal, so win32 uses it). A probe
  * that errors reports "normal" (fail-open): a broken probe must not stall a
  * run, and the load gate still stands on its own.
+ *
+ * Windows caveats, by construction: `os.loadavg()` is hardwired to zero on
+ * win32 (a Unix concept), so the CPU admission gate silently disarms there —
+ * the memory gate and the priority demotion (setPriority → BELOW_NORMAL
+ * class, post-spawn, direct child only) carry host citizenship natively.
+ * WSL2 reports `linux` and gets the full POSIX treatment.
  */
 import { readFileSync } from "node:fs";
-import { availableParallelism, loadavg, platform } from "node:os";
+import { availableParallelism, constants as osConstants, freemem, loadavg, platform, setPriority, totalmem } from "node:os";
 
 /** What the admission/priority decisions read from the machine. Injectable so
  * tests can simulate any host without loading a real one. */
@@ -73,6 +80,16 @@ function linuxMemPressure(): MemPressure {
   return pct >= 50 ? "critical" : pct >= 10 ? "warn" : "normal";
 }
 
+/** Windows: available-physical ratio. `os.freemem()` is ACCURATE here
+ * (GlobalMemoryStatusEx `ullAvailPhys` — genuinely allocatable memory), unlike
+ * macOS where it lies about purgeable pages; that asymmetry is exactly why
+ * each platform reads its own native signal. Exported for tests (no Windows
+ * box in the loop — the thresholds are pinned pure). */
+export function win32MemPressure(freeBytes: number, totalBytes: number): MemPressure {
+  const ratio = totalBytes > 0 ? freeBytes / totalBytes : 1;
+  return ratio < 0.04 ? "critical" : ratio < 0.08 ? "warn" : "normal";
+}
+
 /** The real machine. `hasTaskpolicy` is memoized — PATH doesn't change mid-run. */
 let taskpolicyMemo: boolean | null = null;
 export const realHost: HostProbe = {
@@ -84,12 +101,33 @@ export const realHost: HostProbe = {
     try {
       if (platform() === "darwin") return darwinMemPressure();
       if (platform() === "linux") return linuxMemPressure();
+      if (platform() === "win32") return win32MemPressure(freemem(), totalmem());
     } catch {
       /* fail-open below */
     }
     return "normal"; // no signal (or a broken probe) must never stall a run
   },
 };
+
+/**
+ * Best-effort post-spawn demotion for platforms with no exec-in-place wrapper
+ * — i.e. Windows, where there is no `nice`/`taskpolicy`; `os.setPriority`
+ * maps to the BELOW_NORMAL priority class. Children the target creates AFTER
+ * the demotion lands inherit the class; the small race is a child spawning
+ * grandchildren in the milliseconds before we run — those keep NORMAL.
+ * Acceptable for a best-effort experimental path. POSIX is a no-op here (the
+ * argv wrapper already demoted, race-free, and nice inherits to the whole
+ * tree). Never throws: the child may already have exited, and a failed
+ * demotion must not fail the work itself.
+ */
+export function demotePriority(pid: number, probe: HostProbe = realHost): void {
+  if (probe.platform() !== "win32") return;
+  try {
+    setPriority(pid, osConstants.priority.PRIORITY_BELOW_NORMAL);
+  } catch {
+    /* child already gone, or access denied — the work still ran */
+  }
+}
 
 export type SpawnPriority = "low" | "normal";
 

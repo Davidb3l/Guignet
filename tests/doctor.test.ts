@@ -32,6 +32,24 @@ function baseEnv(cwd: string): DoctorEnv {
   return { cwd, version: "0.0.1", bunVersion: "1.3.13", gitAvailable: true, isGitRepo: true };
 }
 
+describe("platform advisory", () => {
+  test("win32 gets a non-gating experimental warning; the envelope stays healthy", async () => {
+    const cwd = await tmp();
+    const report = await collectReport({ ...baseEnv(cwd), platform: "win32" });
+    const plat = report.checks.find((c) => c.name === "platform");
+    expect(plat).toBeDefined();
+    expect(plat!.ok).toBe(false);
+    expect(plat!.gating).toBe(false);
+    expect(plat!.detail).toContain("WSL2");
+    expect(report.ok).toBe(true); // advisory, not a failure
+  });
+  test("POSIX platforms emit no platform check at all (absent, not present-ok)", async () => {
+    const cwd = await tmp();
+    const report = await collectReport({ ...baseEnv(cwd), platform: "darwin" });
+    expect(report.checks.find((c) => c.name === "platform")).toBeUndefined();
+  });
+});
+
 describe("computeOk fold", () => {
   test("a non-gating failure does NOT drag the envelope unhealthy", () => {
     expect(computeOk([check("a", true, true), check("git_repo", false, false)])).toBe(true);

@@ -9,7 +9,7 @@
  * runs report wall-clock but no token/$ cost. That's honest: we never invent a
  * number a harness didn't give us (§5).
  */
-import { spawnToFile } from "../../core/index.ts";
+import { shellArgv, spawnToFile } from "../../core/index.ts";
 import type { Adapter, AttemptCost, AttemptExit, AttemptInput } from "./types.ts";
 
 /** Wall-clock ceiling when the run config sets no `budget.maxSeconds`. Without
@@ -48,7 +48,10 @@ export function makeGenericCliAdapter(cmdTemplate: string): Adapter {
     async attempt(input: AttemptInput): Promise<{ exit: AttemptExit }> {
       const cmd = substituteCmd(cmdTemplate, input.prompt, input.worktreePath);
       const timeoutMs = input.budget.maxSeconds ? input.budget.maxSeconds * 1000 : DEFAULT_TIMEOUT_MS;
-      const { code, timedOut } = await spawnToFile(["sh", "-c", cmd], {
+      // shellArgv picks the platform shell (sh -c / cmd.exe); the verbatim flag
+      // is part of the cmd.exe contract (see core/proc.ts shellArgv).
+      const { code, timedOut } = await spawnToFile(shellArgv(cmd), {
+        windowsVerbatimArguments: process.platform === "win32",
         cwd: input.worktreePath,
         stdoutPath: `${input.transcriptDir}/stdout.log`,
         stderrPath: `${input.transcriptDir}/stderr.log`,

@@ -10,9 +10,10 @@ import {
   defaultConcurrency,
   realHost,
   waitForHeadroom,
+  win32MemPressure,
   type HostProbe,
 } from "../src/core/host.ts";
-import { runShell } from "../src/core/proc.ts";
+import { runShell, shellArgv, win32KillArgv } from "../src/core/proc.ts";
 import { mapLimit } from "../src/run/pool.ts";
 
 function probe(over: Partial<Record<keyof HostProbe, unknown>>): HostProbe {
@@ -158,10 +159,41 @@ describe("pool admission seam", () => {
   });
 });
 
+describe("windows branches (pure — no Windows box in the loop, so the shapes are pinned)", () => {
+  test("win32 memory pressure from the accurate freemem ratio: <8% warn, <4% critical", () => {
+    const GB = 1024 ** 3;
+    expect(win32MemPressure(8 * GB, 16 * GB)).toBe("normal");
+    expect(win32MemPressure(1 * GB, 16 * GB)).toBe("warn"); // 6.25%
+    expect(win32MemPressure(0.5 * GB, 16 * GB)).toBe("critical"); // ~3.1%
+    expect(win32MemPressure(0, 0)).toBe("normal"); // degenerate total → fail-open
+  });
+  test("win32 shell is ComSpec /d /s /c with the cmd quote-wrapped (node's full shell:true recipe); POSIX stays sh -c", () => {
+    // The outer quotes are load-bearing: /s strips exactly one outer pair, and
+    // the argv is spawned verbatim so embedded quotes reach cmd.exe intact.
+    expect(shellArgv('bun test "x y.test.ts"', "win32", { ComSpec: "C:\\WINDOWS\\system32\\cmd.exe" })).toEqual([
+      "C:\\WINDOWS\\system32\\cmd.exe", "/d", "/s", "/c", '"bun test "x y.test.ts""',
+    ]);
+    expect(shellArgv("bun test", "win32", {})).toEqual(["cmd.exe", "/d", "/s", "/c", '"bun test"']);
+    expect(shellArgv("bun test", "linux", {})).toEqual(["sh", "-c", "bun test"]);
+  });
+  test("win32 tree-kill argv is taskkill /T /F on the pid", () => {
+    expect(win32KillArgv(4242)).toEqual(["taskkill", "/pid", "4242", "/T", "/F"]);
+  });
+});
+
 describe("runShell under low priority", () => {
   test("still executes and captures output (wrapper execs the target in place)", async () => {
     const r = await runShell("echo hostcitizen", { cwd: process.cwd(), priority: "low" });
     expect(r.code).toBe(0);
     expect(r.stdout.trim()).toBe("hostcitizen");
+  });
+  test("a command with an embedded-quoted argument survives the platform shell intact", async () => {
+    // This is the exact string shape mine's win32 shQuote bakes into every
+    // verifier cmd. On the Windows CI job it exercises the full cmd.exe
+    // /d /s /c + outer-quote + verbatim contract (a missing verbatim flag
+    // mangled it into \"…\" — review-caught); on POSIX it's the sh -c path.
+    const r = await runShell('bun -e "console.log(1 + 1)"', { cwd: process.cwd(), priority: "low" });
+    expect(r.code).toBe(0);
+    expect(r.stdout.trim()).toBe("2");
   });
 });

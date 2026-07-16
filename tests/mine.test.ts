@@ -101,6 +101,10 @@ describe("buildVerifierCmd", () => {
     // An embedded single quote is escaped as '\'' and stays a literal.
     expect(buildVerifierCmd("bun test", ["tests/a'b.test.ts"], undefined)).toBe("bun test 'tests/a'\\''b.test.ts'");
   });
+  test("on win32, paths are double-quoted — cmd.exe treats single quotes as literals", () => {
+    // `"` is an illegal filename character on Windows, so a plain wrap is complete.
+    expect(buildVerifierCmd("bun test", ["tests/x y.test.ts"], undefined, "win32")).toBe('bun test "tests/x y.test.ts"');
+  });
 });
 
 // --- end-to-end against a synthetic git repo ---
