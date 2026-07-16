@@ -46,17 +46,15 @@ import { readTruth } from "../core/truth.ts";
  * hung install would itself read as a flake). The excludes are load-bearing
  * precisely because `-x` would otherwise remove node_modules too.
  *
- * Known limitation: only `node_modules` is preserved, so a non-JS repo whose
- * deps or setup artifacts live in-tree under another name (Python `.venv`, a
- * gitignored build dir a test needs) would have them wiped between replays. The
- * direction is fail-safe — such a task fails at fix and is conservatively
- * DISCARDED, never wrongly admitted — but it caps yield on those ecosystems. A
- * future `preservePaths` config knob widens the exclude set; the v0 dogfood
- * corpus is bun-backend, where `node_modules` is the whole story.
+ * `node_modules` is always preserved; config `preservePaths` widens the
+ * exclude set for ecosystems whose setup artifacts live elsewhere (Python
+ * `.venv`, a gitignored build dir a test needs) — without it those were wiped
+ * between replays, fail-safe discarding otherwise-sound tasks (the M1
+ * review's known yield cap, now closed).
  */
-async function resetWorktree(worktreeDir: string): Promise<void> {
+async function resetWorktree(worktreeDir: string, preservePaths: readonly string[]): Promise<void> {
   await git(["reset", "--hard", "HEAD"], worktreeDir);
-  await git(["clean", "-fdx", "-e", "node_modules"], worktreeDir);
+  await git(["clean", "-fdx", "-e", "node_modules", ...preservePaths.flatMap((p) => ["-e", p])], worktreeDir);
 }
 
 /** Collapse whitespace and cap a captured stderr/stdout snippet for a reason string. */
@@ -125,7 +123,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
     // suite to fail — the bug is unfixed. A zero exit or a timeout is wrong.
     let failAtBase = 0;
     for (let i = 0; i < k; i++) {
-      await resetWorktree(worktreeDir);
+      await resetWorktree(worktreeDir, config.preservePaths);
       const applied = await applyDiff(worktreeDir, truth.verifierDiff);
       if (!applied.ok) return verdict(false, failAtBase, 0, `git apply failed for verifier diff: ${snippet(applied.stderr)}`);
       const r = await runShell(verifierCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
@@ -144,7 +142,7 @@ export async function replayTask(repoRoot: string, task: Task, config: Config): 
     // Pass-at-fix: apply the verifier AND the fix and expect a clean pass.
     let passAtFix = 0;
     for (let i = 0; i < k; i++) {
-      await resetWorktree(worktreeDir);
+      await resetWorktree(worktreeDir, config.preservePaths);
       const v = await applyDiff(worktreeDir, truth.verifierDiff);
       if (!v.ok) return verdict(false, failAtBase, passAtFix, `git apply failed for verifier diff: ${snippet(v.stderr)}`);
       const f = await applyDiff(worktreeDir, truth.fixDiff);

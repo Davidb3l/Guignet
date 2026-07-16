@@ -117,6 +117,29 @@ export const ConfigSchema = z.object({
    * presents the split neutrally rather than overclaiming either way.
    */
   repoVisibility: z.enum(["public", "private", "mixed", "unknown"]).default("unknown"),
+  /**
+   * Extra worktree paths PRESERVED across gate/score replay resets, alongside
+   * the always-kept `node_modules` (the M1 review's known limitation: a
+   * non-JS ecosystem whose setup artifacts live elsewhere — Python `.venv`,
+   * a vendored dir, a gitignored build cache a test needs — had them wiped
+   * between replays, fail-safe discarding otherwise-sound tasks). Entries are
+   * `git clean -e` PATTERNS (gitignore-style — "vendor" also matches a nested
+   * foo/vendor; harmless over-preservation). Leading dots are fine (`.venv`
+   * is the flagship case); validated so a hostile entry can't become a git
+   * flag (leading "-"), escape the worktree (".."), or disable the reset
+   * outright (a bare "." would preserve everything).
+   */
+  preservePaths: z
+    .array(
+      z
+        .string()
+        .min(1)
+        .refine(
+          (p) => !p.startsWith("-") && !p.startsWith("/") && p !== "." && !p.includes("..") && !p.includes("\0"),
+          "plain relative pattern (no leading '-' or '/', not '.', no '..')",
+        ),
+    )
+    .default([]),
   /** Validity-gate replay count `k` (§ gate). Default 2. */
   gateReplays: z.number().int().positive().default(2),
   /** Per-verifier-run wall-clock cap (ms). A run exceeding it is treated as an
@@ -243,6 +266,17 @@ export const RunConfigSchema = z.object({
    * measurement" in the report (statistical honesty is a wedge — §9). */
   nAttempts: z.number().int().positive().default(3),
   budgets: ConfigSchema.shape.budgets,
+  /**
+   * HARD run-wide spend cap in dollars, ENFORCED (unlike `budgets.maxDollars`,
+   * which is per-attempt and recorded only — no harness exposes a mid-attempt
+   * dollar kill). Once the summed cost of completed attempts reaches the cap,
+   * no further attempt starts; in-flight attempts finish, so the overshoot is
+   * bounded by one pool-width. Resume-aware: attempts already on disk count,
+   * so a resumed run keeps honoring the same cap — and raising it and
+   * re-running finishes the remainder. Born of a dogfood that estimated $5
+   * and spent $19.54 with nothing but a human watching.
+   */
+  maxTotalDollars: z.number().positive().optional(),
   /** Bounded worktree-pool concurrency. Default min(4, cores/2) resolved in run. */
   maxConcurrency: z.number().int().positive().optional(),
   /** generic-cli only: the command template. `{prompt}` and `{worktree}` are

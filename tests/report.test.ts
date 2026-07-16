@@ -83,6 +83,9 @@ async function seedRun(repo: string): Promise<void> {
     await writeAttempt(repo, "r1", attempt(id, n, dollars));
     await writeVerdict(repo, "r1", verdict(id, n, passed, era, flag));
   }
+  // One attempt had test edits set aside (verifier-authoritative overlay) —
+  // the report must disclose the rate, never silently diverge from disk.
+  await writeVerdict(repo, "r1", { ...verdict("t2", 2, false, "post", false), testEditsFiltered: true });
 }
 
 describe("aggregate", () => {
@@ -107,6 +110,9 @@ describe("aggregate", () => {
     expect(c.flaggedCount).toBe(1);
     expect(c.preCutoffAttempts).toBe(2);
     expect(c.flagRate).toBe(0.5);
+    // overlay transparency: 1 of 4 attempts judged on the source-only projection
+    expect(c.testEditsFilteredCount).toBe(1);
+    expect(c.testEditsFilteredRate).toBe(0.25);
     // suite soundness surfaced
     expect(model.suite.soundnessRate).toBeCloseTo(2 / 5, 5);
     // taxonomy heatmap has the two kinds

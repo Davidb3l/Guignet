@@ -19,6 +19,8 @@ import {
   attemptExists,
   emitEvent,
   git,
+  listRunAttempts,
+  readAttempt,
   readConfig,
   readSuite,
   readTask,
@@ -45,8 +47,15 @@ interface RunResult {
   runId: string;
   attempted: number; // units actually run this invocation
   skipped: number; // units already complete (resume)
+  /** Units NOT started because maxTotalDollars was reached. They have no
+   * attempt.json, so a resume (with a raised cap) runs exactly these. */
+  budgetCapped: number;
   byExit: Record<string, number>;
-  dollars: number | null; // summed where known
+  dollars: number | null; // summed where known, THIS invocation only
+  /** All-time spend the cap was judged against (prior attempts + this
+   * invocation), when a cap is set — the number that explains budgetCapped.
+   * Null when no cap (we don't scan prior attempts without one). */
+  spentDollars: number | null;
 }
 
 function fail(json: boolean, msg: string, code: ExitCode): StageRun {
@@ -142,16 +151,48 @@ export async function runRun(opts: {
   }
 
   const concurrency = runConfig.maxConcurrency ?? defaultConcurrency();
-  const result: RunResult = { runId: runConfig.runId, attempted: 0, skipped, byExit: {}, dollars: null };
+  const result: RunResult = { runId: runConfig.runId, attempted: 0, skipped, budgetCapped: 0, byExit: {}, dollars: null, spentDollars: null };
+
+  // The spend cap is resume-aware: attempts already persisted (this run,
+  // earlier invocations) count against it, so re-invoking a capped run never
+  // silently doubles the budget. Under --force the prior scan is SKIPPED —
+  // every attempt is being replaced, so the cap budgets the fresh re-run
+  // (counting the replaced attempts too would double-charge and cap out at
+  // half the budget). Unknown costs (generic-cli's null) count 0 — the cap
+  // can only bind on costs the harness actually reported.
+  const cap = runConfig.maxTotalDollars ?? Infinity;
+  let spent = 0;
+  if (cap !== Infinity && !force) {
+    for (const { taskId, attempt } of await listRunAttempts(repoRoot, runConfig.runId)) {
+      try {
+        spent += (await readAttempt(repoRoot, runConfig.runId, taskId, attempt)).dollars ?? 0;
+      } catch {
+        /* unreadable attempt — costs nothing */
+      }
+    }
+  }
+  let capAnnounced = false;
 
   const attempts = await mapLimit(
     units,
     concurrency,
     async (u) => {
+      // Spend gate: checked at start-of-unit, so in-flight attempts finish and
+      // the overshoot is bounded by one pool-width. A capped unit writes NO
+      // attempt.json — resuming with a raised cap runs exactly the remainder.
+      if (spent >= cap) {
+        if (!capAnnounced) {
+          capAnnounced = true;
+          process.stderr.write(`run: spend cap reached ($${spent.toFixed(2)} of $${cap.toFixed(2)}) — not starting further attempts\n`);
+        }
+        return "budget-capped" as const;
+      }
       // runOneAttempt records a crashed attempt rather than throwing, but guard
       // anyway so one unexpected error can't abort the whole pool.
       try {
-        return await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, env);
+        const att = await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, env);
+        spent += att.dollars ?? 0;
+        return att;
       } catch {
         return null;
       }
@@ -168,10 +209,15 @@ export async function runRun(opts: {
 
   for (const att of attempts) {
     if (!att) continue;
+    if (att === "budget-capped") {
+      result.budgetCapped++;
+      continue;
+    }
     result.attempted++;
     result.byExit[att.exit] = (result.byExit[att.exit] ?? 0) + 1;
     if (att.dollars !== null) result.dollars = (result.dollars ?? 0) + att.dollars;
   }
+  if (cap !== Infinity) result.spentDollars = spent;
 
   // Suite event spine (§13) — a run finished; solved/total is a scoring concept,
   // so this carries just the run + model. Config-gated + best-effort.
@@ -188,5 +234,10 @@ export async function runRun(opts: {
     `  by exit: ${Object.entries(result.byExit).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
   ];
   if (result.dollars !== null) lines.push(`  total cost: $${result.dollars.toFixed(4)}`);
+  if (result.budgetCapped > 0) {
+    lines.push(
+      `  spend cap: ${result.budgetCapped} attempt(s) not started at $${(result.spentDollars ?? 0).toFixed(2)} of the $${runConfig.maxTotalDollars} cap — raise the cap and re-run to finish them`,
+    );
+  }
   return { stdout: lines.join("\n") + "\n", stderr: "", code };
 }

@@ -221,6 +221,33 @@ describe("gate replay", () => {
     expect((await readGate(s.repo, "dep")).admitted).toBe(true);
   });
 
+  test("(f2) preservePaths keeps a non-node_modules dep dir across replay resets", async () => {
+    const s = await scaffold();
+    // Like test (f), but the "installed" dep lives in `vendor/` — which the
+    // reset wipes unless preservePaths names it. Admission proves it survived
+    // every replay; the control (no preservePaths) proves the wipe is real.
+    await Bun.write(
+      join(s.repo, "verifyVendor.ts"),
+      `import { existsSync } from "node:fs";\nimport { f } from "./a.ts";\nif (!existsSync("vendor/dep.marker")) { console.error("no vendor dep"); process.exit(2); }\nif (f(2, 3) !== 5) process.exit(1);\n`,
+    );
+    await commit(s.repo, "add vendor-requiring verifier");
+    const vSha = await head(s.repo);
+    const verifierVendor = (await git(["diff", s.base, vSha, "--", "verifyVendor.ts"], s.repo)).stdout;
+    const seed = async (cfg: object): Promise<void> => {
+      await writeConfig(s.repo, ConfigSchema.parse({ testCmd: "bun run verifyVendor.ts", setupCmd: "mkdir -p vendor && echo x > vendor/dep.marker", ...cfg }));
+      await writeTask(s.repo, makeTask("vendor-dep", s.base, "bun run verifyVendor.ts"));
+      await writeTruth(s.repo, "vendor-dep", { fixDiff: s.fixGood, verifierDiff: verifierVendor });
+    };
+
+    await seed({ preservePaths: ["vendor"] });
+    const kept = await runGate({ repoRoot: s.repo, json: true, force: true });
+    expect(JSON.parse(kept.stdout).admitted).toBe(1); // dep survived every reset
+
+    await seed({}); // control: default reset wipes vendor/ → fail-safe discard
+    const wiped = await runGate({ repoRoot: s.repo, json: true, force: true });
+    expect(JSON.parse(wiped.stdout).admitted).toBe(0);
+  });
+
   test("(g) a verifier that hangs is discarded via the timeout, not admitted", async () => {
     const s = await scaffold();
     // A tiny verifierTimeoutMs + a sleeping verifier ⇒ timeout at base ⇒ discard.

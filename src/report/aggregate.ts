@@ -129,6 +129,7 @@ async function aggregateRun(
 
   const preCutoffAttempts = allVerdicts.filter((v) => v.cutoffEra === "pre").length;
   const flaggedCount = allVerdicts.filter((v) => v.regurgitationFlag).length;
+  const testEditsFilteredCount = allVerdicts.filter((v) => v.testEditsFiltered).length;
 
   const report: ConfigReport = {
     runId,
@@ -157,6 +158,8 @@ async function aggregateRun(
     flaggedCount,
     preCutoffAttempts,
     flagRate: preCutoffAttempts > 0 ? flaggedCount / preCutoffAttempts : null,
+    testEditsFilteredCount,
+    testEditsFilteredRate: allVerdicts.length > 0 ? testEditsFilteredCount / allVerdicts.length : null,
   };
   return { report, rollups, attemptCount: allAttempts.length };
 }

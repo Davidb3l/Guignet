@@ -24,6 +24,20 @@ afterEach(async () => {
   while (dirs.length) await rm(dirs.pop()!, { recursive: true, force: true });
 });
 
+describe("preservePaths validation", () => {
+  const cfg = (paths: string[]) => ConfigSchema.parse({ testCmd: "bun test", preservePaths: paths });
+  test("accepts the flagship hidden-dir cases (a leading-dot regex bug once rejected .venv)", () => {
+    expect(cfg([".venv", ".cache", ".gradle", "vendor", "target/debug"]).preservePaths).toEqual([
+      ".venv", ".cache", ".gradle", "vendor", "target/debug",
+    ]);
+  });
+  test("rejects entries that could become a git flag, escape, or disable the reset", () => {
+    for (const bad of ["-x", "/abs", ".", "a/../b", ".."]) {
+      expect(() => cfg([bad])).toThrow();
+    }
+  });
+});
+
 describe("config store", () => {
   test("isInitialized reflects config presence", async () => {
     const repo = await tmp();

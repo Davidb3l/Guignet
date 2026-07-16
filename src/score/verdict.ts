@@ -94,9 +94,9 @@ export interface VerdictResult {
  * is a near no-op, but it also erases any stray file `setupCmd` wrote outside
  * node_modules, guaranteeing the verifier sees only base + solution + verifier.
  */
-async function resetWorktree(worktreeDir: string): Promise<void> {
+async function resetWorktree(worktreeDir: string, preservePaths: readonly string[]): Promise<void> {
   await git(["reset", "--hard", "HEAD"], worktreeDir);
-  await git(["clean", "-fdx", "-e", "node_modules"], worktreeDir);
+  await git(["clean", "-fdx", "-e", "node_modules", ...preservePaths.flatMap((p) => ["-e", p])], worktreeDir);
 }
 
 /** Collapse whitespace and cap a captured stderr/stdout snippet for a note. */
@@ -209,7 +209,7 @@ export async function replayVerdict(
     }
 
     // Pristine base (see resetWorktree) before applying the agent's work.
-    await resetWorktree(worktreeDir);
+    await resetWorktree(worktreeDir, config.preservePaths);
 
     // Apply the AGENT's judged (source-only) solution first. If it doesn't
     // apply, the diff is unusable (stale, malformed, or against the wrong base)
@@ -243,7 +243,7 @@ export async function replayVerdict(
       // ("judge the fix, not the machine"). Retry ONCE at normal priority:
       // still fail-safe (a genuine hang times out again; only a real pass can
       // flip the verdict), and brief enough not to defeat host citizenship.
-      await resetWorktree(worktreeDir);
+      await resetWorktree(worktreeDir, config.preservePaths);
       const sol2 = await applyDiff(worktreeDir, judged.kept);
       const ver2 = sol2.ok ? await applyDiff(worktreeDir, truth.verifierDiff) : sol2;
       if (!ver2.ok) return { verdict: verdict(false), note: withFilter("verifier timed out (low priority); state could not be rebuilt for the normal-priority retry") };

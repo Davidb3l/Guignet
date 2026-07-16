@@ -110,8 +110,16 @@ guignet report                       # → .guignet/reports/<ts>/guignet-report.
 A run config:
 
 ```json
-{ "runId": "2026-07-11-sonnet", "adapter": "claude-code", "model": "sonnet", "nAttempts": 3 }
+{ "runId": "2026-07-11-sonnet", "adapter": "claude-code", "model": "sonnet", "nAttempts": 3, "maxTotalDollars": 10 }
 ```
+
+`maxTotalDollars` is a hard, run-wide spend cap: once the summed cost of
+completed attempts reaches it, no further attempt starts (in-flight ones
+finish, so the overshoot is bounded by one pool-width). Capped attempts write
+nothing — resume with a raised cap to run exactly the remainder. It is
+resume-aware: attempts already on disk count against it — except under
+`--force`, where every attempt is being replaced, so the cap budgets the
+fresh re-run alone.
 
 Every command accepts `--json` (exactly one JSON object on stdout). Exit codes:
 `0` ok · `1` failure · `2` usage · `3` soft-blocked.
@@ -125,6 +133,7 @@ Every command accepts `--json` (exactly one JSON object on stdout). Exit codes:
 | `subdir` | package root inside a monorepo |
 | `repoVisibility` | `public` / `private` / `mixed` / `unknown` — frames the cutoff split (contamination vs knowledge-freshness) |
 | `cutoffs` | per-model training-cutoff overrides (ISO dates) |
+| `preservePaths` | extra worktree paths preserved across replay resets, beside the always-kept `node_modules` (e.g. `.venv`, a vendored dir a test needs) |
 | `gateReplays` | validity replay count `k` (default 2) |
 | `testCwd` | where setup/verifier/agent run: `subdir` (default) or `repo` — use `repo` for workspace test runners (vitest `projects`, pnpm/nx) that must execute at the repo root |
 | `host.priority` | scheduling priority for all spawned work: `low` (default — yields to your foreground) / `normal` |

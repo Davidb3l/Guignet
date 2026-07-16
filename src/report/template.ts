@@ -253,9 +253,21 @@ function flagsAndSoundness(model: ReportModel): string {
     </div>`,
     )
     .join("");
+  // Disclosed, not hidden: how often the judged diff differed from the raw
+  // solution because held-out test-path edits were set aside (METHODOLOGY §4).
+  const filtered = model.configs
+    .filter((c) => c.testEditsFilteredRate !== null)
+    .map(
+      (c) => `<div class="tile">
+      <div class="tile-label">test edits set aside · <span class="mono">${esc(c.model)}</span></div>
+      <div class="tile-num mono">${esc(pct(c.testEditsFilteredRate))}</div>
+      <div class="tile-sub mono">${c.testEditsFilteredCount} attempt(s) judged on the source-only projection</div>
+    </div>`,
+    )
+    .join("");
   return `<section class="reveal">
     <h2>Integrity</h2>
-    <div class="tiles">${soundness}${flags}</div>
+    <div class="tiles">${soundness}${flags}${filtered}</div>
   </section>`;
 }
 

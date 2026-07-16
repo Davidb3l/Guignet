@@ -61,6 +61,15 @@ export interface ConfigReport {
   flaggedCount: number;
   preCutoffAttempts: number;
   flagRate: number | null;
+
+  /** Attempts whose solution ALSO edited held-out verifier/test paths — those
+   * edits were set aside before judging (verifier-authoritative overlay,
+   * METHODOLOGY §4). Disclosed because a judged diff that differs from
+   * solution.diff on disk must never be silent. Rate is over ALL scored
+   * attempts (unlike flagRate's pre-cutoff-only denominator: regurgitation is
+   * only meaningful pre-cutoff, but the overlay is era-independent). */
+  testEditsFilteredCount: number;
+  testEditsFilteredRate: number | null;
 }
 
 /** One cell of the kind × area heatmap (for the primary config). */

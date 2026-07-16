@@ -9,7 +9,7 @@ import { runRun } from "../src/run/index.ts";
 import { spawnToFile } from "../src/core/proc.ts";
 import { captureWorktreeDiff, git, worktreeAdd } from "../src/core/git.ts";
 import { ConfigSchema, type Task } from "../src/core/schema.ts";
-import { writeConfig, writeSuite, writeTask, attemptDir, readAttempt } from "../src/core/store.ts";
+import { writeConfig, writeSuite, writeTask, attemptDir, readAttempt, writeAttempt } from "../src/core/store.ts";
 
 const dirs: string[] = [];
 async function tmp(): Promise<string> {
@@ -171,6 +171,42 @@ async function writeRunCfg(repo: string, cmd: string, nAttempts: number): Promis
   await writeFile(path, JSON.stringify({ runId: "2026-07-11-mock", adapter: "generic-cli", nAttempts, genericCli: { cmd }, maxConcurrency: 2 }));
   return path;
 }
+
+describe("maxTotalDollars spend cap", () => {
+  test("a run at/over its cap starts NO further attempts, and they stay resumable", async () => {
+    const { repo, base } = await initRepo();
+    await seedSuite(repo, base, ["t1", "t2"]);
+    // One attempt already on disk cost $10 — the resume-aware sum must count
+    // it against a $5 cap, so every remaining unit is capped, not run.
+    await writeAttempt(repo, "2026-07-11-mock", {
+      taskId: "t1", attempt: 1, wallclockMs: 1, tokens: null, dollars: 10, exit: "completed",
+    });
+    const cfg = join(repo, "run-config.json");
+    await writeFile(cfg, JSON.stringify({
+      runId: "2026-07-11-mock", adapter: "generic-cli", nAttempts: 2,
+      genericCli: { cmd: "echo ran > mark.txt" }, maxConcurrency: 2, maxTotalDollars: 5,
+    }));
+
+    const run = await runRun({ repoRoot: repo, json: true, force: false, config: cfg });
+    expect(run.code).toBe(0);
+    const out = JSON.parse(run.stdout);
+    expect(out.skipped).toBe(1); // the pre-existing t1#1 (resume)
+    expect(out.attempted).toBe(0); // nothing new ran
+    expect(out.budgetCapped).toBe(3); // t1#2, t2#1, t2#2 all held
+    expect(out.spentDollars).toBe(10); // the all-time spend that tripped the cap, surfaced
+    // Capped units wrote NO attempt.json — a raised cap re-runs exactly them.
+    await expect(readAttempt(repo, "2026-07-11-mock", "t2", 1)).rejects.toBeTruthy();
+  });
+
+  test("with no cap, behavior is unchanged (existing runs are unaffected)", async () => {
+    const { repo, base } = await initRepo();
+    await seedSuite(repo, base, ["t1"]);
+    const cfg = await writeRunCfg(repo, "echo x > y.txt", 1);
+    const out = JSON.parse((await runRun({ repoRoot: repo, json: true, force: false, config: cfg })).stdout);
+    expect(out.attempted).toBe(1);
+    expect(out.budgetCapped).toBe(0);
+  });
+});
 
 describe("runRun end-to-end (generic-cli)", () => {
   test("runs N attempts per task, captures the agent's diff, and reports", async () => {
