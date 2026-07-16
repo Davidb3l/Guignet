@@ -52,11 +52,14 @@ scheduling priority (`taskpolicy -c utility` on macOS, `nice` on Linux;
 unchanged on other platforms), so your foreground always wins under
 contention. The run pool is host-aware on two kernel signals — CPU load
 average and the kernel's own memory-pressure verdict
-(`kern.memorystatus_vm_pressure_level` on macOS, PSI on Linux): it adds
-concurrency only while the machine has headroom on both, starts narrower on
-an already-strained machine, and degrades to sequential progress (never a
-stall, never a freeze) under saturation. Runs are resumable, so interrupting
-one costs nothing.
+(`kern.memorystatus_vm_pressure_level` on macOS, PSI on Linux). Memory
+pressure "warn" narrows the pool's *starting* width (it's a chronic steady
+state on 8–16 GB Macs, so it never throttles a run mid-flight); "critical"
+and CPU saturation hold extra concurrency, degrading to sequential progress
+(never a stall, never a freeze). On hosts with no pressure signal (e.g. a
+Linux kernel without PSI) the memory gate quietly disarms — fail-open — and
+the CPU gate stands alone. Runs are resumable, so interrupting one costs
+nothing.
 
 Low priority is also what gets starved on a busy machine, so a verifier could
 time out under contention where it would have passed — `score` therefore

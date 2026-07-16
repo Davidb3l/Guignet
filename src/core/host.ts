@@ -142,14 +142,17 @@ export async function waitForHeadroom(opts: HeadroomOptions): Promise<void> {
   const sleepMs = opts.sleepMs ?? 1_000;
   const threshold = opts.maxLoadPerCore * probe.cores();
   let sinceLogMs = Infinity; // fire the first message immediately
-  // CPU saturation OR kernel-reported memory pressure holds extra concurrency
-  // — an agent attempt costs ~1 GB+, and admitting into "warn" is how a 16 GB
-  // machine ends up swapping its user's foreground.
+  // CPU saturation OR CRITICAL memory pressure holds extra concurrency.
+  // Deliberately not "warn": on 8–16 GB Macs warn is a chronic steady state
+  // (compressed memory / lazy reclaim under ordinary multitasking), and
+  // gating on it would silently serialize whole runs — even against an
+  // explicit maxConcurrency. Warn instead narrows the STARTING width
+  // (defaultConcurrency below); critical means reclaim is losing, which is
+  // the swap-death vector an extra ~1 GB agent attempt would feed.
   const busy = (): string | null => {
-    if (probe.load1() > threshold)
-      return `load ${probe.load1().toFixed(1)} > ${threshold.toFixed(1)} on ${probe.cores()} cores`;
-    const mem = probe.memPressure();
-    return mem === "normal" ? null : `memory pressure ${mem}`;
+    const load = probe.load1();
+    if (load > threshold) return `load ${load.toFixed(1)} > ${threshold.toFixed(1)} on ${probe.cores()} cores`;
+    return probe.memPressure() === "critical" ? "memory pressure critical" : null;
   };
   let reason: string | null;
   while (opts.active() > 0 && (reason = busy()) !== null) {

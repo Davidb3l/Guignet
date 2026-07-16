@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildPriorityArgv,
   defaultConcurrency,
+  realHost,
   waitForHeadroom,
   type HostProbe,
 } from "../src/core/host.ts";
@@ -59,11 +60,16 @@ describe("waitForHeadroom", () => {
     await waitForHeadroom({ maxLoadPerCore: 1.5, active: () => others, probe: probe({ load1: () => 999 }), sleepMs: 5 });
     expect(others).toBe(0);
   });
-  test("kernel memory pressure holds extra concurrency even when CPU load is fine", async () => {
-    let mem: "normal" | "warn" = "warn";
+  test("CRITICAL memory pressure holds extra concurrency even when CPU load is fine", async () => {
+    let mem: "normal" | "critical" = "critical";
     setTimeout(() => (mem = "normal"), 30);
     await waitForHeadroom({ maxLoadPerCore: 1.5, active: () => 1, probe: probe({ memPressure: () => mem }), sleepMs: 5 });
     expect(mem as string).toBe("normal"); // resolved only after pressure lifted
+  });
+  test("'warn' does NOT hold admission — chronic macOS steady state must not serialize a run", async () => {
+    const start = Date.now();
+    await waitForHeadroom({ maxLoadPerCore: 1.5, active: () => 1, probe: probe({ memPressure: () => "warn" }), sleepMs: 5 });
+    expect(Date.now() - start).toBeLessThan(100); // admitted immediately; warn only narrows the starting width
   });
 });
 
@@ -83,7 +89,6 @@ describe("defaultConcurrency (load-aware)", () => {
   test("the real probe reports a valid pressure level on this machine", () => {
     // Smoke: whatever the level is right now, it must be one of the tri-state
     // values and must not throw (fail-open contract).
-    const { realHost } = require("../src/core/host.ts") as typeof import("../src/core/host.ts");
     expect(["normal", "warn", "critical"]).toContain(realHost.memPressure());
   });
 });
