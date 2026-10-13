@@ -144,6 +144,47 @@ describe("aggregate", () => {
     expect(html).toContain("1/2 attempts priced");
   });
 
+  test("unscored attempts are disclosed and excluded from the solve-rate denominator, not counted as failures", async () => {
+    const repo = await tmp();
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test" }));
+    await writeSuite(repo, { taskIds: ["t1", "t2", "t3"], soundnessRate: { admitted: 3, candidates: 3 }, minedAt: "2026-07-01T00:00:00Z" });
+    for (const id of ["t1", "t2", "t3"]) await writeTask(repo, task(id, "2026-05-01T00:00:00Z", "bugfix", ["core"]));
+    await writeRunConfig(repo, { runId: "r1", adapter: "claude-code", model: "opus", nAttempts: 2, budgets: undefined });
+    // t1: solved by a scored attempt (its second attempt is unscored, but one pass is enough).
+    // t2: scored fail + an UNSCORED attempt -> undetermined, excluded.
+    // t3: both scored, both fail -> a real failure that stays in the denominator.
+    const rows: [string, number, boolean | null][] = [
+      ["t1", 1, true], ["t1", 2, null],
+      ["t2", 1, false], ["t2", 2, null],
+      ["t3", 1, false], ["t3", 2, false],
+    ];
+    for (const [id, n, passed] of rows) {
+      await writeSolutionDiff(repo, "r1", id, n, "+x");
+      await writeAttempt(repo, "r1", attempt(id, n, 0.1));
+      if (passed !== null) await writeVerdict(repo, "r1", verdict(id, n, passed, "post", false));
+    }
+
+    const model = await aggregate(repo, "2026-07-11T12:00:00Z");
+    const c = model.configs[0]!;
+    expect(c.attemptsUnscored).toBe(2);
+    expect(c.tasksUnresolved).toBe(1); // t2 only
+    expect(c.tasksTotal).toBe(2); // t1 + t3
+    expect(c.tasksSolved).toBe(1);
+    expect(c.solveRate).toBe(0.5);
+    const html = renderReportHtml(model);
+    expect(html).toContain("2 attempt(s) unscored");
+    expect(html).toContain("1 task(s) undetermined");
+  });
+
+  test("a fully scored run reports zero unscored attempts and renders no unscored tile", async () => {
+    const repo = await tmp();
+    await seedRun(repo);
+    const model = await aggregate(repo, "2026-07-11T12:00:00Z");
+    expect(model.configs[0]!.attemptsUnscored).toBe(0);
+    expect(model.configs[0]!.tasksUnresolved).toBe(0);
+    expect(renderReportHtml(model)).not.toContain("unscored");
+  });
+
   test("an empty store yields a renderable, empty model (soft state, not a crash)", async () => {
     const repo = await tmp();
     await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test" }));

@@ -12,8 +12,8 @@
  * naming the `truth` path segment, closing the raw-fs-under-taskDir route.
  */
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 
 import type { z } from "zod";
 
@@ -104,8 +104,38 @@ async function writeJson<T extends z.ZodTypeAny>(
   if (!result.success) {
     throw new StoreError(`refusing to write invalid ${path}: ${result.error.message}`);
   }
+  await atomicWriteFile(path, JSON.stringify(result.data, null, 2) + "\n");
+}
+
+/**
+ * Write `text` to `path` atomically: write a temp file in the SAME directory
+ * (same filesystem, so the rename can't degrade to copy+delete), then rename it
+ * over the target. A crash or kill mid-write leaves either the old file or the
+ * new one — never a truncated one. This matters because `attempt.json` /
+ * `verdict.json` EXISTING is the resume marker: a half-written one would be
+ * skipped as "done" and then fail schema validation on every later read.
+ */
+async function atomicWriteFile(path: string, text: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(result.data, null, 2) + "\n", "utf-8");
+  const tmp = join(dirname(path), `.${basename(path)}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`);
+  try {
+    await writeFile(tmp, text, "utf-8");
+    // Windows can transiently refuse a replace-rename while a scanner/reader
+    // holds the target; a short retry rides that out.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await rename(tmp, path);
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (attempt >= 9 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
+        await new Promise((r) => setTimeout(r, 15 * (attempt + 1)));
+      }
+    }
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 /** A store-layer error — a bad file, not a program bug. */

@@ -286,21 +286,85 @@ describe("score verdict", () => {
     expect(run.stderr).toContain("does-not-exist");
   });
 
-  test("(i) an attempt whose task is missing discards as a defensible fail", async () => {
+  test("(i) an attempt whose task is missing is left UNSCORED (environment), not persisted as a fail", async () => {
     const s = await scaffold();
     await writeScoreConfig(s.repo);
     await writeRun(s.repo);
     // A solution.diff on disk for a task that was never written — score must not
-    // crash; it discards this attempt as passed:false.
+    // crash, and must not blame the agent: no verdict.json, counted as unscored.
     await writeSolutionDiff(s.repo, RUN_ID, "ghost", 1, s.fixGood);
 
     const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(1); // an environment problem surfaces as a failure exit
+    const out = JSON.parse(run.stdout);
+    expect(out.unscored).toBe(1);
+    expect(out.scored).toBe(0);
+    expect(out.failed).toBe(0);
+    expect(run.stderr).toContain("NOT SCORED");
+    expect(run.stderr).toContain("ghost");
+    expect(verdictExists(s.repo, RUN_ID, "ghost", 1)).toBe(false);
+  });
+
+  test("(i2) a missing-truth attempt is unscored, and a later score retries it once the truth exists", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    await writeRun(s.repo);
+    await writeTask(s.repo, makeTask("late", s.base, POST_DATE));
+    await writeSolutionDiff(s.repo, RUN_ID, "late", 1, s.fixGood); // truth NOT written yet
+
+    const first = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(first.code).toBe(1);
+    expect(JSON.parse(first.stdout).unscored).toBe(1);
+    expect(verdictExists(s.repo, RUN_ID, "late", 1)).toBe(false); // nothing terminal on disk
+
+    // Environment repaired: the very next plain `score` (no --force) judges it.
+    await writeTruth(s.repo, "late", { fixDiff: s.fixGood, verifierDiff: s.verifierA });
+    const second = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(second.code).toBe(0);
+    expect(JSON.parse(second.stdout).passed).toBe(1);
+    expect((await readVerdict(s.repo, RUN_ID, "late", 1)).passed).toBe(true);
+  });
+
+  test("(i3) a failing setupCmd is an environment error — unscored, never a stored fail", async () => {
+    const s = await scaffold();
+    await writeConfig(s.repo, ConfigSchema.parse({ testCmd: "bun run verifyA.ts", setupCmd: "exit 3", cutoffs: { [MODEL]: CUTOFF } }));
+    await writeRun(s.repo);
+    await seedTask(s.repo, s, "setupfail", POST_DATE, s.fixGood);
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(run.code).toBe(1);
+    expect(JSON.parse(run.stdout).unscored).toBe(1);
+    expect(run.stderr).toContain("setup failed");
+    expect(verdictExists(s.repo, RUN_ID, "setupfail", 1)).toBe(false);
+
+    // Setup repaired → the same attempt is now judged, and a correct fix passes.
+    await writeConfig(s.repo, ConfigSchema.parse({ testCmd: "bun run verifyA.ts", cutoffs: { [MODEL]: CUTOFF } }));
+    const again = await runScore({ repoRoot: s.repo, json: true, force: false });
+    expect(JSON.parse(again.stdout).passed).toBe(1);
+  });
+
+  test("(i4) agent-side failures are still real, stored fails (a wrong fix; a diff that won't apply)", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    await writeRun(s.repo);
+    await seedTask(s.repo, s, "wrong", POST_DATE, s.fixBad);
+    await seedTask(s.repo, s, "garbage", POST_DATE, "diff --git a/nope.ts b/nope.ts\n--- a/nope.ts\n+++ b/nope.ts\n@@ -1 +1 @@\n-x\n+y\n");
+
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false });
     expect(run.code).toBe(0);
-    expect(JSON.parse(run.stdout).failed).toBe(1);
-    const v = await readVerdict(s.repo, RUN_ID, "ghost", 1);
-    expect(v.passed).toBe(false);
-    expect(v.cutoffEra).toBe("unknown");
-    expect(v.similarity).toBeNull();
+    const out = JSON.parse(run.stdout);
+    expect(out.failed).toBe(2);
+    expect(out.unscored).toBe(0);
+    expect((await readVerdict(s.repo, RUN_ID, "wrong", 1)).passed).toBe(false);
+    expect((await readVerdict(s.repo, RUN_ID, "garbage", 1)).passed).toBe(false);
+  });
+
+  test("(i5) an unsafe explicit run id is a usage error (never touches the filesystem)", async () => {
+    const s = await scaffold();
+    await writeScoreConfig(s.repo);
+    const run = await runScore({ repoRoot: s.repo, json: true, force: false, runId: "../../etc" });
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain("invalid run id");
   });
 
   // --- the verifier-authoritative overlay (score/verdict.ts header) ---

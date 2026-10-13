@@ -29,9 +29,12 @@
  * unit of work and ALWAYS tears the worktree down in a `finally`, so a large
  * run can't leak worktrees. The key difference from gate is one attempt (not k
  * replays), and a distinct fail-safe direction: gate is conservative about
- * ADMITTING a task, whereas here every un-judgeable condition (diff won't apply,
- * setup fails, verifier crashes/hangs) resolves to `passed:false` — the agent
- * gets no credit for a solution we could not objectively verify.
+ * ADMITTING a task, whereas here every AGENT-side un-judgeable condition (the
+ * diff won't apply, the verifier fails or hangs) resolves to `passed:false` —
+ * the agent gets no credit for a solution we could not objectively verify.
+ * ENVIRONMENT-side failures (worktree/setup/verifier-launch) are different:
+ * they say nothing about the agent, so they return `unscoreable` and are never
+ * persisted as a verdict (see VerdictResult).
  *
  * Worktree-per-attempt (not per-task): attempts of one task share a base commit
  * and could share a worktree with a reset between, saving repeated setup. We
@@ -84,6 +87,17 @@ export interface VerdictInputs {
 export interface VerdictResult {
   verdict: Verdict;
   note: string | null;
+  /**
+   * Non-null when the attempt could NOT be judged for an ENVIRONMENT reason
+   * (worktree creation failed, the subdir is gone, setup failed/timed out, the
+   * verifier could not run at all) — as opposed to an AGENT failure (the diff
+   * doesn't apply, the verifier fails or hangs). `verdict` is then only a
+   * placeholder: the caller must NOT persist it. A stored `passed:false` is
+   * terminal (resume skips it) and counts against the agent in every report,
+   * so charging the agent for our broken environment would be a wrong, sticky
+   * verdict; leaving the attempt unscored lets a later `score` retry it.
+   */
+  unscoreable: string | null;
 }
 
 /**
@@ -162,7 +176,7 @@ export async function replayVerdict(
   // The agent produced nothing — there is nothing to verify. Resolve to a fail
   // WITHOUT spawning a worktree (the whole apply→run path would be moot).
   if (solutionDiff.trim() === "") {
-    return { verdict: verdict(false), note: "empty solution diff (agent produced nothing)" };
+    return { verdict: verdict(false), note: "empty solution diff (agent produced nothing)", unscoreable: null };
   }
 
   // The agent ONLY edited held-out paths — there is no source-side work to
@@ -170,7 +184,7 @@ export async function replayVerdict(
   // this resolves to a fail without spawning a worktree. (An agent cannot pass
   // by rewriting the tests; that is the point of holding them out.)
   if (judged.kept.trim() === "") {
-    return { verdict: verdict(false), note: withFilter("solution contained only held-out test-path edits — no source change to judge") };
+    return { verdict: verdict(false), note: withFilter("solution contained only held-out test-path edits — no source change to judge"), unscoreable: null };
   }
 
   // `git worktree add` wants a NON-existent target, so we point it INSIDE the
@@ -188,7 +202,10 @@ export async function replayVerdict(
   try {
     const add = await worktreeAdd(repoRoot, task.baseSha, worktreeDir);
     if (!add.ok) {
-      return { verdict: verdict(false), note: `could not create worktree at ${task.baseSha}: ${snippet(add.stderr)}` };
+      {
+      const note = `could not create worktree at ${task.baseSha}: ${snippet(add.stderr)}`;
+      return { verdict: verdict(false), note, unscoreable: note };
+    }
     }
 
     // Mirror the gate/run guard: if the mined `subdir` is absent at this base
@@ -196,7 +213,10 @@ export async function replayVerdict(
     // note instead of spawning setup/verifier into a non-existent cwd (the
     // cryptic "posix_spawn 'sh' ENOENT"). Un-scoreable ⇒ passed:false (fail-safe).
     if (config.subdir && !existsSync(worktreeSubdir)) {
-      return { verdict: verdict(false), note: `subdir '${config.subdir}' does not exist at base commit ${task.baseSha.slice(0, 10)}` };
+      {
+      const note = `subdir '${config.subdir}' does not exist at base commit ${task.baseSha.slice(0, 10)}`;
+      return { verdict: verdict(false), note, unscoreable: note };
+    }
     }
 
     // Setup once — the worktree didn't inherit the repo's node_modules. Setup
@@ -204,8 +224,14 @@ export async function replayVerdict(
     // the attempt is un-scoreable ⇒ passed:false (fail-safe direction).
     if (config.setupCmd) {
       const setup = await runShell(config.setupCmd, { cwd: execCwd, timeoutMs, priority: config.host.priority });
-      if (setup.timedOut) return { verdict: verdict(false), note: "setup timed out" };
-      if (setup.code !== 0) return { verdict: verdict(false), note: `setup failed: ${snippet(setup.stderr || setup.stdout)}` };
+      // Setup is environment, not agent work (it runs BEFORE the solution is
+      // applied, and the gate proved it works at this base) — so its failure
+      // leaves the attempt unjudged rather than failed.
+      if (setup.timedOut) return { verdict: verdict(false), note: "setup timed out", unscoreable: "setup timed out" };
+      if (setup.code !== 0) {
+        const note = `setup failed: ${snippet(setup.stderr || setup.stdout)}`;
+        return { verdict: verdict(false), note, unscoreable: note };
+      }
     }
 
     // Pristine base (see resetWorktree) before applying the agent's work.
@@ -218,7 +244,7 @@ export async function replayVerdict(
     // what broke it.
     const sol = await applyDiff(worktreeDir, judged.kept);
     if (!sol.ok) {
-      return { verdict: verdict(false), note: withFilter(`agent solution diff did not apply: ${snippet(sol.stderr)}`) };
+      return { verdict: verdict(false), note: withFilter(`agent solution diff did not apply: ${snippet(sol.stderr)}`), unscoreable: null };
     }
 
     // Then overlay the held-out verifier (the tests). Collisions with the
@@ -229,7 +255,7 @@ export async function replayVerdict(
     // (the fail-safe direction: never wrongly credit).
     const ver = await applyDiff(worktreeDir, truth.verifierDiff);
     if (!ver.ok) {
-      return { verdict: verdict(false), note: withFilter(`held-out verifier diff did not apply over the solution: ${snippet(ver.stderr)}`) };
+      return { verdict: verdict(false), note: withFilter(`held-out verifier diff did not apply over the solution: ${snippet(ver.stderr)}`), unscoreable: null };
     }
 
     // The primary verdict: run the held-out verifier. Pass iff it exits 0 within
@@ -246,17 +272,26 @@ export async function replayVerdict(
       await resetWorktree(worktreeDir, config.preservePaths);
       const sol2 = await applyDiff(worktreeDir, judged.kept);
       const ver2 = sol2.ok ? await applyDiff(worktreeDir, truth.verifierDiff) : sol2;
-      if (!ver2.ok) return { verdict: verdict(false), note: withFilter("verifier timed out (low priority); state could not be rebuilt for the normal-priority retry") };
+      if (!ver2.ok) {
+        const note = withFilter("verifier timed out (low priority); state could not be rebuilt for the normal-priority retry") ?? "";
+        return { verdict: verdict(false), note, unscoreable: note };
+      }
       r = await runShell(task.verifierCmd, { cwd: execCwd, timeoutMs, priority: "normal" });
       if (!r.timedOut) {
         const passed2 = r.code === 0;
-        return { verdict: verdict(passed2), note: withFilter(passed2 ? "passed on normal-priority retry after a low-priority timeout" : `verifier failed (exit ${r.code}) on normal-priority retry`) };
+        return { verdict: verdict(passed2), note: withFilter(passed2 ? "passed on normal-priority retry after a low-priority timeout" : `verifier failed (exit ${r.code}) on normal-priority retry`), unscoreable: null };
       }
     }
-    if (r.timedOut) return { verdict: verdict(false), note: withFilter("verifier timed out") };
-    if (r.code === null) return { verdict: verdict(false), note: withFilter("verifier could not run (killed/crashed)") };
+    // A genuine hang is the agent's (its fix looped forever) — a fail.
+    if (r.timedOut) return { verdict: verdict(false), note: withFilter("verifier timed out"), unscoreable: null };
+    // No exit code and no timeout: the verifier process was killed or never
+    // ran — the machine, not the fix. Unjudged, so a later score retries it.
+    if (r.code === null) {
+      const note = withFilter("verifier could not run (killed/crashed)") ?? "";
+      return { verdict: verdict(false), note, unscoreable: note };
+    }
     const passed = r.code === 0;
-    return { verdict: verdict(passed), note: withFilter(passed ? null : `verifier failed (exit ${r.code})`) };
+    return { verdict: verdict(passed), note: withFilter(passed ? null : `verifier failed (exit ${r.code})`), unscoreable: null };
   } finally {
     // Always tear down — a worktree leak across a large run is a real bug.
     await worktreeRemove(repoRoot, worktreeDir);

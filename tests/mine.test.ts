@@ -3,7 +3,7 @@ import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { runMine, buildVerifierCmd } from "../src/mine/index.ts";
+import { runMine, buildVerifierCmd, UnsafeVerifierPathError, win32UnsafeChar } from "../src/mine/index.ts";
 import { classifyPaths, isTestFile, isSourceFile } from "../src/core/classify.ts";
 import { discover, compileLoosePrefix } from "../src/mine/discover.ts";
 import { buildPromptContext, reconstructPrompt } from "../src/mine/prompt.ts";
@@ -92,18 +92,32 @@ describe("taxonomy", () => {
 
 describe("buildVerifierCmd", () => {
   test("scopes the test cmd to subdir-relative test paths", () => {
-    expect(buildVerifierCmd("bun test", ["pkg/tests/x.test.ts"], "pkg")).toBe("bun test 'tests/x.test.ts'");
-    expect(buildVerifierCmd("bun test", ["tests/x.test.ts"], undefined)).toBe("bun test 'tests/x.test.ts'");
+    expect(buildVerifierCmd("bun test", ["pkg/tests/x.test.ts"], "pkg", "linux")).toBe("bun test 'tests/x.test.ts'");
+    expect(buildVerifierCmd("bun test", ["tests/x.test.ts"], undefined, "linux")).toBe("bun test 'tests/x.test.ts'");
   });
   test("single-quotes paths so shell metacharacters can't expand or mangle", () => {
     // A path with `$` must not be shell-expanded when run under `sh -c`.
-    expect(buildVerifierCmd("bun test", ["tests/foo$bar.test.ts"], undefined)).toBe("bun test 'tests/foo$bar.test.ts'");
+    expect(buildVerifierCmd("bun test", ["tests/foo$bar.test.ts"], undefined, "linux")).toBe("bun test 'tests/foo$bar.test.ts'");
     // An embedded single quote is escaped as '\'' and stays a literal.
-    expect(buildVerifierCmd("bun test", ["tests/a'b.test.ts"], undefined)).toBe("bun test 'tests/a'\\''b.test.ts'");
+    expect(buildVerifierCmd("bun test", ["tests/a'b.test.ts"], undefined, "linux")).toBe("bun test 'tests/a'\\''b.test.ts'");
   });
   test("on win32, paths are double-quoted — cmd.exe treats single quotes as literals", () => {
-    // `"` is an illegal filename character on Windows, so a plain wrap is complete.
     expect(buildVerifierCmd("bun test", ["tests/x y.test.ts"], undefined, "win32")).toBe('bun test "tests/x y.test.ts"');
+    // Parens, commas and semicolons are inert inside double quotes.
+    expect(buildVerifierCmd("bun test", ["tests/a(1),b;c.test.ts"], undefined, "win32")).toBe('bun test "tests/a(1),b;c.test.ts"');
+  });
+  test("on win32, a path with a cmd.exe metacharacter is REFUSED, not quoted into injectable syntax", () => {
+    // History can carry paths from other platforms: `"` closes the quote, %VAR%
+    // expands inside quotes, ! expands under delayed expansion, & | < > ^ are live.
+    for (const bad of ['tests/a"b.test.ts', "tests/100%.test.ts", "tests/a&calc.test.ts", "tests/a|b.test.ts", "tests/a^b.test.ts", "tests/a!b.test.ts", "tests/a<b.test.ts", "tests/a>b.test.ts", "tests/a\nb.test.ts"]) {
+      expect(() => buildVerifierCmd("bun test", [bad], undefined, "win32")).toThrow(UnsafeVerifierPathError);
+    }
+    // One bad path anywhere in the set refuses the whole command.
+    expect(() => buildVerifierCmd("bun test", ["tests/ok.test.ts", "tests/%PATH%.test.ts"], undefined, "win32")).toThrow(UnsafeVerifierPathError);
+    expect(win32UnsafeChar("tests/ok y.test.ts")).toBeNull();
+  });
+  test("the same characters are fine on POSIX (single-quoted, inert)", () => {
+    expect(buildVerifierCmd("bun test", ["tests/a&b%c!d.test.ts"], undefined, "linux")).toBe("bun test 'tests/a&b%c!d.test.ts'");
   });
 });
 
@@ -172,6 +186,27 @@ describe("runMine end-to-end", () => {
     expect(truth.fixDiff).toContain("src/calc.ts");
     expect(truth.fixDiff).toContain("a + b");
     expect(truth.verifierDiff).toContain("tests/calc.test.ts");
+  });
+
+  test("a test path with a cmd.exe metacharacter is discarded on win32 (and mined normally elsewhere)", async () => {
+    const repo = await initRepo();
+    await commit(repo, { "src/m.ts": "export const m = () => 0;\n" }, "seed");
+    await commit(repo, { "src/m.ts": "export const m = () => 1;\n", "tests/a&b%c.test.ts": "test('m',()=>{});\n" }, "fix: m");
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test" }));
+
+    const run = await runMine({ repoRoot: repo, json: true, force: false });
+    const summary = JSON.parse(run.stdout);
+    if (process.platform === "win32") {
+      expect(run.code).toBe(3); // nothing reconstructed ⇒ soft-blocked
+      expect(summary.reconstructed).toBe(0);
+      expect(Object.keys(summary.discardReasons).join("\n")).toContain("cmd.exe metacharacter");
+      expect(await listTaskIds(repo)).toEqual([]);
+    } else {
+      expect(run.code).toBe(0);
+      expect(summary.reconstructed).toBe(1);
+      const task = await readTask(repo, (await listTaskIds(repo))[0]!);
+      expect(task.verifierCmd).toContain("'tests/a&b%c.test.ts'");
+    }
   });
 
   test("emits a conformant suite.mined event to the spine when enabled (§13)", async () => {

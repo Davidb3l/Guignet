@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,7 +12,7 @@ import {
   writeSuite,
   readSuite,
 } from "../src/core/store.ts";
-import { ConfigSchema, type Config } from "../src/core/schema.ts";
+import { ConfigSchema, RunConfigSchema, RunIdSchema, type Config } from "../src/core/schema.ts";
 
 const dirs: string[] = [];
 async function tmp(): Promise<string> {
@@ -94,5 +94,69 @@ describe("suite store", () => {
     const back = await readSuite(repo);
     expect(back.taskIds).toEqual(["a1", "b2"]);
     expect(back.soundnessRate.candidates).toBe(5);
+  });
+});
+
+describe("atomic JSON writes", () => {
+  const suite = (n: number) => ({
+    taskIds: Array.from({ length: n }, (_, i) => "t" + i),
+    soundnessRate: { admitted: n, candidates: n },
+    minedAt: "2026-07-11T00:00:00Z",
+  });
+
+  test("leaves no temp files behind and replaces an existing file", async () => {
+    const repo = await tmp();
+    await writeSuite(repo, suite(1));
+    await writeSuite(repo, suite(3));
+    expect((await readSuite(repo)).taskIds).toHaveLength(3);
+    const names = await readdir(join(repo, ".guignet"));
+    expect(names.filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    expect(names).toContain("suite.json");
+  });
+
+  test("a refused (invalid) write leaves the previous file intact and no temp file", async () => {
+    const repo = await tmp();
+    await writeConfig(repo, ConfigSchema.parse({ testCmd: "bun test" }));
+    const before = await readFile(configPath(repo), "utf-8");
+    // @ts-expect-error — deliberately invalid
+    await expect(writeConfig(repo, { testCmd: "" })).rejects.toBeInstanceOf(StoreError);
+    expect(await readFile(configPath(repo), "utf-8")).toBe(before);
+    expect((await readdir(join(repo, ".guignet"))).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  test("a reader polling during repeated rewrites never sees a torn file", async () => {
+    const repo = await tmp();
+    await writeSuite(repo, suite(1));
+    let stop = false;
+    let bad = 0;
+    const reader = (async () => {
+      while (!stop) {
+        try {
+          await readSuite(repo);
+        } catch {
+          bad++;
+        }
+        await new Promise((r) => setTimeout(r, 1));
+      }
+    })();
+    for (let i = 0; i < 20; i++) await writeSuite(repo, suite(1 + (i % 5) * 200));
+    stop = true;
+    await reader;
+    expect(bad).toBe(0);
+  });
+});
+
+describe("runId validation", () => {
+  const base = { adapter: "generic-cli", genericCli: { cmd: "true" } };
+  test("accepts ordinary run slugs", () => {
+    for (const ok of ["2026-07-11-mock", "r1", "opus_4.8-run.2", "A"]) {
+      expect(RunConfigSchema.parse({ ...base, runId: ok }).runId).toBe(ok);
+    }
+  });
+  test("rejects path separators, traversal, hidden/empty/oversized ids", () => {
+    for (const bad of ["", "..", ".", "../x", "a/b", "a\b", ".hidden", "a..b", "a b", "a:b", "x".repeat(129), "C:evil"]) {
+      expect(RunIdSchema.safeParse(bad).success).toBe(false);
+      expect(() => RunConfigSchema.parse({ ...base, runId: bad })).toThrow();
+    }
   });
 });

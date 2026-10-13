@@ -79,6 +79,31 @@ export interface SpawnToFileOptions {
   windowsVerbatimArguments?: boolean;
 }
 
+/** Git env vars that redirect git to a DIFFERENT repository than the cwd's. */
+const GIT_REDIRECT_VARS = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+];
+
+/**
+ * The environment an agent process runs with: ours, plus `extra`, minus any git
+ * variable that would point the agent's git at another repository. If Guignet
+ * itself runs under `GIT_DIR=…` (e.g. from a git hook), the agent's isolated
+ * workspace would otherwise silently resolve back to the target repo and
+ * defeat the leak firewall (METHODOLOGY.md §1). Exported for tests.
+ */
+export function agentEnv(extra?: Record<string, string>, base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...base, ...extra };
+  for (const k of GIT_REDIRECT_VARS) delete env[k];
+  return env;
+}
+
 /**
  * Spawn `argv` and stream its stdout/stderr STRAIGHT TO FILES (via OS file
  * descriptors), never buffering in this process. This is the agent-supervision
@@ -109,7 +134,7 @@ export async function spawnToFile(
   try {
     proc = Bun.spawn(buildPriorityArgv(argv, opts.priority ?? "low"), {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      env: agentEnv(opts.env),
       stdin: "ignore",
       stdout: outFh.fd,
       stderr: errFh.fd,

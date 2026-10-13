@@ -31,7 +31,17 @@
  */
 import { fileURLToPath } from "node:url";
 
-const DEFAULT_SRC = fileURLToPath(new URL("../src/", import.meta.url));
+/**
+ * Normalize a filesystem path to forward slashes. On Windows `fileURLToPath`,
+ * `mkdtemp` and `Bun.Glob.scan` all yield backslash paths, while every split and
+ * comparison below is on `/` — without this the area lookup classified every
+ * file as "other" and the whole firewall silently did nothing.
+ */
+function slashed(p: string): string {
+  return p.replaceAll("\\", "/");
+}
+
+const DEFAULT_SRC = slashed(fileURLToPath(new URL("../src/", import.meta.url)));
 
 type Area = "core" | "cli" | "bin" | "mine" | "gate" | "run" | "score" | "report" | "other";
 const STAGES = new Set(["mine", "gate", "run", "score", "report"]);
@@ -107,6 +117,9 @@ function extractNames(clause: string): string[] {
 function resolveSource(fromFile: string, source: string): string | null {
   if (!source.startsWith(".")) return null;
   const fromDir = fromFile.slice(0, fromFile.lastIndexOf("/"));
+  // Keep the root form of the input ("/abs" on POSIX, "C:/abs" on Windows) so
+  // the result compares equal to `src + "core/truth.ts"`.
+  const lead = fromFile.startsWith("/") ? "/" : "";
   const parts = (fromDir + "/" + source).split("/");
   const out: string[] = [];
   for (const p of parts) {
@@ -114,7 +127,7 @@ function resolveSource(fromFile: string, source: string): string | null {
     if (p === "..") out.pop();
     else out.push(p);
   }
-  return "/" + out.join("/");
+  return lead + out.join("/");
 }
 
 function isTruthModule(absTarget: string, src: string): boolean {
@@ -148,11 +161,14 @@ function mentionsTruthPath(text: string): boolean {
  * point it at a synthetic tree and prove the firewall actually catches leaks —
  * not merely that the real tree happens to be clean today.
  */
-export async function scanTree(src: string): Promise<Violation[]> {
+export async function scanTree(srcDir: string): Promise<Violation[]> {
+  // Normalize to "/" and guarantee a trailing slash (`src + rel` below).
+  const src = slashed(srcDir).replace(/\/?$/, "/");
   const glob = new Bun.Glob("**/*.ts");
   const violations: Violation[] = [];
 
-  for await (const rel of glob.scan({ cwd: src })) {
+  for await (const scanned of glob.scan({ cwd: srcDir })) {
+    const rel = slashed(scanned);
     const abs = src + rel;
     const area = areaOf(abs, src);
     const text = await Bun.file(abs).text();

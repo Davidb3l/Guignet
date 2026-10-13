@@ -47,14 +47,40 @@ import { buildTaxonomy } from "./taxonomy.ts";
  * backtick, and `\`, so a metacharacter in a test path can't be expanded or
  * mangled under `sh -c` — a mangled path would run the wrong scope, or none,
  * and spuriously discard a sound task); embedded quotes escape as `'\''`.
- * Windows (cmd.exe): double-quote — single quotes are LITERALS there, and `"`
- * is an illegal filename character on Windows, so a plain wrap is complete.
+ * Windows (cmd.exe): double-quote — single quotes are LITERALS there. A plain
+ * wrap is NOT complete, though: git history can carry paths created on other
+ * platforms, and `"` closes the quote, `%VAR%` still expands inside quotes,
+ * `!` expands under delayed expansion, and `& | < > ^` are live the moment a
+ * quote is unbalanced. cmd.exe has no escape that is safe across all of these,
+ * so on win32 a path containing any such character is REFUSED (the task is
+ * discarded with a recorded reason) rather than emitted as injectable syntax.
  * The quoting is baked into task.json at mine time, which is one more reason
  * a mined suite is a same-machine artifact, not a portable one.
  */
 function shQuote(s: string, plat: NodeJS.Platform): string {
-  if (plat === "win32") return `"${s}"`;
+  if (plat === "win32") {
+    const bad = win32UnsafeChar(s);
+    if (bad !== null) {
+      throw new UnsafeVerifierPathError(
+        `test path ${JSON.stringify(s)} contains ${JSON.stringify(bad)}, a cmd.exe metacharacter — refusing to build a verifier command from it on Windows`,
+      );
+    }
+    return `"${s}"`;
+  }
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The first character of `s` that cannot be safely carried in a cmd.exe
+ * double-quoted argument, or null. Parens/comma/semicolon/space are inert
+ * inside double quotes and allowed. */
+export function win32UnsafeChar(s: string): string | null {
+  const m = /["%&|<>^!\r\n\0]/.exec(s);
+  return m ? m[0] : null;
+}
+
+/** A test path that cannot be quoted safely for the platform shell. */
+export class UnsafeVerifierPathError extends Error {
+  override name = "UnsafeVerifierPathError";
 }
 
 /** Build the verifier command: the repo's test cmd scoped to the changed tests,
@@ -117,6 +143,17 @@ async function reconstruct(
   // so its paths must stay repo-root-relative — only strip the subdir prefix when
   // the verifier actually runs WITH subdir as cwd (the default).
   const stripDir = config.testCwd === "repo" ? undefined : subdir;
+  let verifierCmd: string;
+  try {
+    verifierCmd = buildVerifierCmd(config.testCmd, testPaths, stripDir);
+  } catch (err) {
+    if (err instanceof UnsafeVerifierPathError) {
+      // Same-reason bucket for every such path (the specific path is in the message).
+      process.stderr.write(`mine: discarding ${commit.sha.slice(0, 10)}: ${err.message}\n`);
+      return { discard: "test path contains a cmd.exe metacharacter (unsafe verifier command on win32)" };
+    }
+    throw err;
+  }
   const task: Task = {
     id,
     prompt: reconstructPrompt(buildPromptContext(commit)),
@@ -124,7 +161,7 @@ async function reconstruct(
     sourceSha: commit.sha,
     date: commit.isoDate,
     taxonomy: buildTaxonomy(commit.subject, sourcePaths, sourceStats, subdir),
-    verifierCmd: buildVerifierCmd(config.testCmd, testPaths, stripDir),
+    verifierCmd,
     discoveredBy,
   };
   await writeTask(repoRoot, task);

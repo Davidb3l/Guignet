@@ -255,9 +255,22 @@ export type Suite = z.infer<typeof SuiteSchema>;
 export const AdapterNameSchema = z.enum(["claude-code", "generic-cli"]);
 export type AdapterName = z.infer<typeof AdapterNameSchema>;
 
+/**
+ * A run id is a path segment (`.guignet/runs/<runId>/…`), so it must be a safe
+ * slug: letters, digits, `.`, `_`, `-` only — no separators, no `..`, no
+ * leading dot (hidden dir), bounded length. Anything else could escape the runs
+ * dir or collide with the store's own files.
+ */
+export const RunIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._-]+$/, "runId may contain only letters, digits, '.', '_' and '-'")
+  .refine((s) => !s.startsWith(".") && !s.includes(".."), "runId must not start with '.' or contain '..'");
+
 /** A run's configuration: `.guignet/runs/<runId>/config.json` (§ run). */
 export const RunConfigSchema = z.object({
-  runId: z.string(),
+  runId: RunIdSchema,
   adapter: AdapterNameSchema,
   /** Model id — adapter-specific (claude-code passes it to `--model`). Optional
    * so an adapter can use its own default. */

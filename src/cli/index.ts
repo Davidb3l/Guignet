@@ -7,6 +7,7 @@
  *   guignet run --config X    execute attempts (resumable)            (M2)
  *   guignet score [runId]     verdicts + metrics + contamination      (M3)
  *   guignet report            regenerate HTML from the store          (M3)
+ *   guignet version           print `guignet <version>` (also --version / -V)
  *
  * Arg parsing is hand-rolled (no commander/yargs) to match the suite style.
  * Conventions (§4): `--json` ⇒ exactly one JSON object on stdout, all logs to
@@ -32,6 +33,7 @@ Usage:
   guignet run --config <f> [--json]  Execute attempts in isolated worktrees
   guignet score [<runId>] [--json]   Verdicts + metrics + contamination
   guignet report [--json]          Regenerate the HTML report from the store
+  guignet version                  Print "guignet <version>" (also --version, -V)
   guignet --help                   Show this help
 
 All commands accept --json (exactly one JSON object on stdout). mine/gate/run/
@@ -81,9 +83,17 @@ export async function main(argv: string[]): Promise<number> {
   const json = args.includes("--json");
   const force = args.includes("--force");
   const wantsHelp = args.includes("--help") || args.includes("-h");
+  const wantsVersion = args.includes("--version") || args.includes("-V");
   const positionals = args.filter((a) => !a.startsWith("-"));
   const sub = positionals[0];
   const cwd = process.cwd();
+
+  // `guignet --version` / `guignet version`: one plain line, exit 0 — the suite's
+  // doctor probes this. (A bare `--version` wins over a subcommand, like most CLIs.)
+  if (wantsVersion || sub === "version") {
+    process.stdout.write(`guignet ${await readVersion()}\n`);
+    return EXIT.OK;
+  }
 
   if (wantsHelp && !sub) {
     // §4 rule 1: nothing non-JSON on stdout under --json. A bare `--json --help`
