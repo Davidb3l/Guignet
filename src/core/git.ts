@@ -15,11 +15,16 @@ export interface GitResult {
   code: number | null;
 }
 
-/** Run `git <args...>` in `cwd`. Never throws — inspect `ok`/`code`. */
-export async function git(args: string[], cwd: string): Promise<GitResult> {
+/**
+ * Run `git <args...>` in `cwd`. Never throws — inspect `ok`/`code`. `env` is
+ * merged over the current environment (used by the isolated-workspace builder
+ * to pin author/committer identity and dates).
+ */
+export async function git(args: string[], cwd: string, env?: Record<string, string>): Promise<GitResult> {
   try {
     const proc = Bun.spawn(["git", ...args], {
       cwd,
+      ...(env ? { env: { ...process.env, ...env } } : {}),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -68,6 +73,32 @@ export async function gitStdin(args: string[], cwd: string, stdin: string): Prom
   }
 }
 
+/**
+ * Pinned git config + flags for EVERY diff-producing invocation. A user's
+ * global/local git config must never change the bytes Guignet stores or
+ * applies: `diff.noprefix=true` yields diffs `git apply -p1` rejects,
+ * `color.ui=always` injects ANSI escapes, `diff.mnemonicPrefix` swaps a/b for
+ * i/w/c, `diff.external` hands output to a foreign tool, `diff.relative` strips
+ * a directory prefix, and `core.quotepath` C-quotes non-ASCII names. The `-c`
+ * pins override config of any scope; the explicit flags override it again for
+ * the prefixes and the external driver.
+ */
+const DIFF_CONFIG = [
+  "-c", "diff.noprefix=false",
+  "-c", "diff.mnemonicPrefix=false",
+  "-c", "diff.relative=false",
+  "-c", "diff.renames=true",
+  "-c", "color.ui=never",
+  "-c", "color.diff=never",
+  "-c", "core.quotepath=false",
+];
+const DIFF_FLAGS = ["--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/"];
+
+/** `git diff` with config + output format pinned (see DIFF_CONFIG). */
+export function gitDiff(args: string[], cwd: string): Promise<GitResult> {
+  return git(["--literal-pathspecs", ...DIFF_CONFIG, "diff", ...DIFF_FLAGS, ...args], cwd);
+}
+
 /** One commit's metadata (first-parent view). */
 export interface CommitMeta {
   sha: string;
@@ -98,7 +129,8 @@ export async function listCommits(
   opts: { subdir?: string; limit?: number } = {},
 ): Promise<CommitMeta[]> {
   const fmt = ["%H", "%P", "%aI", "%s", "%ae", "%b"].join(FS) + RS;
-  const args = ["log", "--no-merges", `--max-count=${opts.limit ?? 1000}`, `--format=${fmt}`];
+  // `log.showSignature` would print gpg output ahead of every record and corrupt the parse.
+  const args = ["-c", "log.showSignature=false", "log", "--no-merges", `--max-count=${opts.limit ?? 1000}`, `--format=${fmt}`];
   if (opts.subdir) args.push("--", opts.subdir);
   const r = await git(args, repoRoot);
   if (!r.ok) return [];
@@ -127,24 +159,32 @@ export interface ChangedFile {
   path: string;
 }
 
-/** Files changed between `parentSha` and `sha`, optionally scoped to `subdir`. */
+/**
+ * Files changed between `parentSha` and `sha`, optionally scoped to `subdir`.
+ * Parsed from `--name-status -z`: NUL-delimited and never C-quoted, so
+ * non-ASCII (and tab/newline/quote-bearing) names come back verbatim and work
+ * as pathspecs. Records are `STATUS\0path\0`; renames/copies (R100, C75) carry
+ * TWO paths — `STATUS\0old\0new\0` — and we report the new one.
+ */
 export async function changedFiles(
   repoRoot: string,
   parentSha: string,
   sha: string,
   subdir?: string,
 ): Promise<ChangedFile[]> {
-  const args = ["diff", "--name-status", parentSha, sha];
+  const args = ["--name-status", "-z", parentSha, sha];
   if (subdir) args.push("--", subdir);
-  const r = await git(args, repoRoot);
+  const r = await gitDiff(args, repoRoot);
   if (!r.ok) return [];
   const files: ChangedFile[] = [];
-  for (const line of r.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    const parts = line.split("\t");
-    const status = parts[0]?.[0] ?? "?";
-    // Renames/copies (R100, C75) carry old\tnew — the changed path is the last field.
-    const path = parts[parts.length - 1];
+  const tokens = r.stdout.split("\0");
+  for (let i = 0; i < tokens.length; ) {
+    const statusTok = tokens[i++];
+    if (!statusTok) continue; // trailing empty token after the final NUL
+    const status = statusTok[0] ?? "?";
+    const twoPaths = status === "R" || status === "C";
+    const first = tokens[i++];
+    const path = twoPaths ? tokens[i++] : first;
     if (path) files.push({ status, path });
   }
   return files;
@@ -158,7 +198,7 @@ export async function fileDiff(
   paths: readonly string[],
 ): Promise<string> {
   if (paths.length === 0) return "";
-  const r = await git(["diff", parentSha, sha, "--", ...paths], repoRoot);
+  const r = await gitDiff([parentSha, sha, "--", ...paths], repoRoot);
   return r.ok ? r.stdout : "";
 }
 
@@ -176,17 +216,26 @@ export async function numstat(
   paths: readonly string[],
 ): Promise<NumStat[]> {
   if (paths.length === 0) return [];
-  const r = await git(["diff", "--numstat", parentSha, sha, "--", ...paths], repoRoot);
+  // -z: NUL-delimited and unquoted. A record is `added\tdeleted\tpath\0`; a
+  // rename/copy is `added\tdeleted\t\0old\0new\0` (empty path field, then both).
+  const r = await gitDiff(["--numstat", "-z", parentSha, sha, "--", ...paths], repoRoot);
   if (!r.ok) return [];
   const out: NumStat[] = [];
-  for (const line of r.stdout.split("\n")) {
-    if (!line.trim()) continue;
-    const [added, deleted, ...rest] = line.split("\t");
+  const tokens = r.stdout.split("\0");
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (!tok) continue;
+    const [added, deleted, ...rest] = tok.split("\t");
+    let path = rest.join("\t");
+    if (path === "") {
+      i++; // rename/copy: skip the old path, keep the new one
+      path = tokens[++i] ?? "";
+    }
     out.push({
       // Binary files report "-"; count them as 0 changed lines.
       added: added === "-" ? 0 : Number(added) || 0,
       deleted: deleted === "-" ? 0 : Number(deleted) || 0,
-      path: rest.join("\t"),
+      path,
     });
   }
   return out;
@@ -220,6 +269,99 @@ export async function captureWorktreeDiff(worktreeDir: string): Promise<string> 
   // that touches a binary file still APPLIES at score time — an abbreviated
   // binary diff is rejected by `git apply` ("cannot apply binary patch … without
   // full index line").
-  const r = await git(["diff", "--cached", "--binary", "HEAD"], worktreeDir);
+  const r = await gitDiff(["--cached", "--binary", "HEAD"], worktreeDir);
   return r.ok ? r.stdout : "";
+}
+
+/** Fixed identity + timestamp for the snapshot root commit, so two exports of
+ * the same base commit produce the SAME root commit id (deterministic). */
+const SNAPSHOT_IDENTITY = {
+  GIT_AUTHOR_NAME: "guignet",
+  GIT_AUTHOR_EMAIL: "guignet@local",
+  GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+  GIT_COMMITTER_NAME: "guignet",
+  GIT_COMMITTER_EMAIL: "guignet@local",
+  GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+};
+
+/**
+ * Build an ISOLATED workspace for an agent: the tree of `sha` exported into a
+ * fresh directory `dest` (which must not exist yet) and committed as the single
+ * ROOT commit of a brand-new repository. This is the leak firewall's answer to
+ * `git worktree add`: a linked worktree shares the source repo's object store
+ * and `.git` points back at it, so an agent could `git log --all` its way to
+ * the held-out fix commit, or follow `.git`/`git worktree list` to the main
+ * checkout where `.guignet/tasks/<id>/truth/` lives. Here there is nothing to
+ * find: the new repo contains exactly one commit, no remote, no alternates, no
+ * `commondir`/`gitdir` link — `.git` is a real, self-contained directory.
+ *
+ * Export is `read-tree` into a TEMPORARY index file + `checkout-index`, so the
+ * source repo's own index, HEAD and worktree are never touched (and
+ * `export-ignore`/`export-subst` attributes, which `git archive` would honor,
+ * cannot silently drop files from the base the verifier is judged against).
+ * The checkout filters (autocrlf, LFS) apply exactly as they do for a worktree.
+ *
+ * Hooks are neutralised (empty hooksPath, `--no-verify`), signing is off, and
+ * the identity/dates are pinned, so user git config cannot change the result.
+ * The new repo's local config keeps those safe defaults for the agent's own
+ * commits too. Never throws — returns `{ ok:false, error }` instead.
+ */
+export async function createIsolatedWorkspace(
+  repoRoot: string,
+  sha: string,
+  dest: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { mkdir, rm } = await import("node:fs/promises");
+  const indexFile = `${dest}.index`;
+  const hooksDir = `${dest}.nohooks`;
+  const fail = (step: string, r: GitResult): { ok: false; error: string } => ({
+    ok: false,
+    error: `${step} failed: ${(r.stderr || r.stdout).trim().slice(0, 300)}`,
+  });
+  try {
+    await mkdir(dest, { recursive: true });
+    await mkdir(hooksDir, { recursive: true });
+
+    // 1. Export the tree of `sha` (temp index; the source repo is read-only here).
+    const prefix = dest.replaceAll("\\", "/").replace(/\/?$/, "/");
+    const idxEnv = { GIT_INDEX_FILE: indexFile };
+    const rt = await git(["read-tree", sha], repoRoot, idxEnv);
+    if (!rt.ok) return fail("read-tree", rt);
+    const co = await git(["checkout-index", "-a", "-f", `--prefix=${prefix}`], repoRoot, idxEnv);
+    if (!co.ok) return fail("checkout-index", co);
+
+    // 2. A brand-new repo with safe local defaults. `--template=` skips the
+    // user's init.templateDir (and its hooks); the branch name is set via
+    // symbolic-ref so it works on git < 2.28 too.
+    const init = await git(["init", "-q", "--template="], dest);
+    if (!init.ok) return fail("init", init);
+    await git(["symbolic-ref", "HEAD", "refs/heads/guignet-base"], dest);
+    const cfg: [string, string][] = [
+      ["core.hooksPath", hooksDir],
+      ["commit.gpgsign", "false"],
+      ["tag.gpgsign", "false"],
+      ["core.fsmonitor", "false"],
+      ["user.name", "guignet"],
+      ["user.email", "guignet@local"],
+    ];
+    for (const [k, v] of cfg) await git(["config", k, v], dest);
+
+    // 3. One root commit of everything exported. `-f`: every file on disk came
+    // from the tracked tree, so a user's global excludesFile must not be able
+    // to leave one untracked (its later edits would vanish from the diff).
+    const add = await git(["add", "-A", "-f"], dest);
+    if (!add.ok) return fail("add", add);
+    const commit = await git(
+      ["commit", "-q", "--no-verify", "--allow-empty", "--no-gpg-sign", "-m", "guignet: task base snapshot"],
+      dest,
+      SNAPSHOT_IDENTITY,
+    );
+    if (!commit.ok) return fail("commit", commit);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  } finally {
+    await rm(indexFile, { force: true }).catch(() => {});
+    await rm(hooksDir, { recursive: true, force: true }).catch(() => {});
+  }
 }

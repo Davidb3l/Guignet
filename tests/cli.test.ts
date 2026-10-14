@@ -87,6 +87,16 @@ describe("guignet CLI", () => {
     expect(r.stdout).toContain("guignet");
   });
 
+  test("--version / -V / `version` print `guignet <package.json version>` and exit 0 (the suite doctor probes this)", async () => {
+    const pkg = JSON.parse(await Bun.file(fileURLToPath(new URL("../package.json", import.meta.url))).text());
+    for (const args of [["--version"], ["-V"], ["version"]]) {
+      const r = await guignet(args, await tmp()); // outside any git repo: needs no repo
+      expect(r.code).toBe(0);
+      expect(r.stdout).toBe(`guignet ${pkg.version}\n`);
+      expect(r.stderr).toBe("");
+    }
+  });
+
   test("doctor --json → exit 0 and exactly one JSON object on stdout", async () => {
     const repo = await tmp();
     const r = await guignet(["doctor", "--json"], repo);

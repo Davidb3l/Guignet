@@ -40,6 +40,31 @@ import-boundary check fails the build if any stage that shouldn't touch ground
 truth so much as names its path. The mining stage writes ground truth once and
 never reads it back.
 
+*The agent's workspace is part of the firewall.* An agent is not given a `git
+worktree` of your repo: a linked worktree shares the repo's object store (so
+`git log --all` shows the held-out fix commit) and its `.git` file points back
+at your checkout, where the held-out diffs are stored. Instead each attempt runs
+in a fresh temp directory that holds only the base commit's files, committed as
+the **single root commit of a brand-new repository** — no other commits, no
+remote, no alternates, no `commondir`/`gitdir` link, a real `.git` directory.
+The fix's objects are simply not in it. The captured solution is the diff
+against that root commit, and `score` applies that diff to Guignet's own
+worktree at the real base, so scoring is unchanged. Inherited `GIT_DIR`-style
+environment variables are scrubbed from the agent's environment so they can't
+redirect its git elsewhere.
+
+*What this does not do.* This closes the repository-history and
+repository-pointer routes; it is **not a sandbox**. The agent still runs as
+your user with full permissions (`--dangerously-skip-permissions` for
+`claude-code`), so a determined agent can read any file your account can —
+including your original checkout by an absolute path it guesses or discovers
+elsewhere (shell history, editor state, other clones) — and can reach the
+network (it could, in principle, fetch the public upstream repository's fix).
+Filesystem and network isolation of the agent (container/VM, restricted
+mount namespace) is out of scope for v0. Treat results on repositories whose
+fixes are public, or whose history an agent could plausibly retrieve, with the
+contamination controls in §5 in mind.
+
 ## 2. The validity gate — why the tasks are trustworthy
 
 A reconstructed task is only admitted after Guignet proves it reproduces
@@ -59,8 +84,11 @@ is not hidden; it's a signal about mining quality on that repo.
 
 ## 3. Execution — running agents fairly
 
-Each attempt runs in its own disposable git worktree checked out at the task's
-base commit. Guignet installs the repo's dependencies first, so the agent starts
+Each attempt runs in its own disposable, isolated workspace holding the task's
+base commit as a single-commit repository (see the leak firewall in §1 — it is
+deliberately *not* a linked worktree of your repo). Guignet's own validity gate
+and scoring still use real worktrees of your repo, since only Guignet's code
+runs in them. Guignet installs the repo's dependencies first, so the agent starts
 from the same working environment a developer would (able to resolve imports and
 run tests) — setup time is *not* charged against the agent. The harness never
 pushes and never touches your real checkout.
@@ -81,9 +109,19 @@ and any aggregate built from partial coverage is marked a lower bound.
 
 The primary verdict is binary and judge-free: apply the agent's solution to a
 fresh worktree, overlay the held-out verifier, run it. Pass or fail. Every
-un-judgeable condition (the solution won't apply, the environment won't build,
-the verifier crashes or hangs) resolves to a fail — the agent gets no credit for
-a solution that couldn't be objectively verified.
+condition that is the *agent's* (the solution won't apply, the verifier fails or
+hangs) resolves to a fail — the agent gets no credit for a solution that
+couldn't be objectively verified.
+
+Conditions that are *ours* are different: a missing task or truth file, a
+worktree that won't create, a setup command that fails or times out, a verifier
+process that never launched. Those say nothing about the agent, so `score`
+writes **no verdict** for the attempt (it logs it, counts it as unscored, and
+exits non-zero) rather than a stored fail that resume would never revisit. The
+next `score` retries it. The report discloses unscored attempts and excludes
+any task whose outcome they leave undetermined (no pass among its scored
+attempts, but an unscored one that might have passed) from the solve-rate
+numerator *and* denominator, rather than counting it as a failure.
 
 **The verifier is authoritative over its own paths.** Agents routinely fix the
 source *and* write their own tests — often in the very files the held-out

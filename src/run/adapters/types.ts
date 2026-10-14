@@ -20,7 +20,7 @@ export type AttemptExit = "completed" | "budget-exhausted" | "crashed";
 export interface AttemptInput {
   /** The task statement (already reconstructed + firewalled by mine). */
   prompt: string;
-  /** Disposable worktree checked out at the task's base commit. */
+  /** Disposable ISOLATED workspace (single-commit repo of the task's base files — NOT a linked worktree; see run/worktree.ts). Name kept for the {worktree} placeholder. */
   worktreePath: string;
   /** Pre-created dir where the adapter must write its raw session record. */
   transcriptDir: string;

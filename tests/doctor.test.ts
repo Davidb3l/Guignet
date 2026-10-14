@@ -106,7 +106,8 @@ describe("envelope", () => {
     const env = buildEnvelope(await collectReport(baseEnv(repo)));
     expect(env.tool).toBe("guignet");
     expect(env.schemaVersion).toBe(SCHEMA_VERSION);
-    expect(env.capabilities).toEqual([]);
+    // Guignet emits to the event spine (core/events.ts), so it advertises that — and only that.
+    expect(env.capabilities).toEqual(["events.emit"]);
     expect("ui" in env).toBe(false); // §3.2: no served UI in v0
     expect(Array.isArray(env.checks)).toBe(true);
   });

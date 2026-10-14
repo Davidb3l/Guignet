@@ -12,13 +12,18 @@
  *
  * Which runs: an explicit `runId` scores just that run (a real FAILURE if its
  * config can't be read); with no runId, EVERY run on disk is scored (SOFT_BLOCK
- * when there are none). A per-attempt load failure (bad task/truth/solution)
- * discards THAT attempt as a defensible `passed:false` — it never crashes the
- * whole run.
+ * when there are none). A per-attempt problem never crashes the whole run, and
+ * is classified by WHOSE fault it is: an agent-side failure (diff won't apply,
+ * verifier fails/hangs) is a real `passed:false` verdict; an ENVIRONMENT-side
+ * failure (missing task/truth, worktree/setup failure, verifier couldn't launch)
+ * leaves the attempt UNSCORED — logged, counted as `unscored`, exit 1 — and
+ * writes no verdict.json, so the next `score` retries it. Persisting those as
+ * a terminal `passed:false` would charge the agent for our broken environment
+ * and resume would never revisit it.
  */
 import {
   EXIT,
-  classifyEra,
+  RunIdSchema,
   git,
   listRunAttempts,
   listRuns,
@@ -46,15 +51,14 @@ interface RunSummary {
   passed: number;
   failed: number;
   flagged: number; // regurgitation-flagged (a passed solution can still be flagged)
+  /** Attempts that could NOT be judged for an environment reason this
+   * invocation. No verdict was written; they are neither passed nor failed and
+   * are excluded from both. A later `score` retries them. */
+  unscored: number;
 }
 
 function emptySummary(runId: string): RunSummary {
-  return { runId, scored: 0, passed: 0, failed: 0, flagged: 0 };
-}
-
-/** A defensible verdict for an attempt we could not load/replay — never a pass. */
-function unscoreable(taskId: string, attempt: number, era: Verdict["cutoffEra"]): Verdict {
-  return { taskId, attempt, passed: false, bloatRatio: null, similarity: null, regurgitationFlag: false, cutoffEra: era, testEditsFiltered: false };
+  return { runId, scored: 0, passed: 0, failed: 0, flagged: 0, unscored: 0 };
 }
 
 /** Score every attempt of one run, writing a verdict.json each. Accumulates into
@@ -79,35 +83,40 @@ async function scoreRun(
       continue;
     }
 
-    // Load the task first so we can still classify the era even if truth/solution
-    // loading later fails (era needs only task.date + the model cutoff).
-    let task: Task | null = null;
+    // Environment-side problems below leave the attempt UNSCORED (no verdict
+    // written) — see the header. `unscore` records one.
+    const unscore = (why: string): void => {
+      summary.unscored++;
+      log(`score: ${runConfig.runId}/${taskId}#${attempt} — NOT SCORED (environment; the next score retries it): ${why}`);
+    };
+
+    let task: Task;
     try {
       task = await readTask(repoRoot, taskId);
     } catch (err) {
-      log(`score: ${runConfig.runId}/${taskId}#${attempt} — cannot read task: ${(err as Error).message}`);
+      unscore(`cannot read task: ${(err as Error).message}`);
+      continue;
     }
-    const era = task ? classifyEra(task.date, cutoffIso) : "unknown";
 
     let verdict: Verdict;
-    if (!task) {
-      verdict = unscoreable(taskId, attempt, era);
-    } else {
-      try {
-        const solutionDiff = await readSolutionDiff(repoRoot, runConfig.runId, taskId, attempt);
-        const res = await replayVerdict(repoRoot, config, { task, attempt, solutionDiff, cutoffIso });
-        verdict = res.verdict;
-        log(
-          `score: ${runConfig.runId}/${taskId}#${attempt} ${verdict.passed ? "PASSED" : "failed"}` +
-            (res.note ? ` (${res.note})` : "") +
-            (verdict.regurgitationFlag ? " [regurgitation]" : ""),
-        );
-      } catch (err) {
-        // Truth missing/unreadable, or an unexpected replay error — un-scoreable,
-        // but we keep the era we could classify from the task.
-        verdict = unscoreable(taskId, attempt, era);
-        log(`score: ${runConfig.runId}/${taskId}#${attempt} — could not score: ${(err as Error).message}`);
+    try {
+      const solutionDiff = await readSolutionDiff(repoRoot, runConfig.runId, taskId, attempt);
+      const res = await replayVerdict(repoRoot, config, { task, attempt, solutionDiff, cutoffIso });
+      if (res.unscoreable !== null) {
+        unscore(res.unscoreable);
+        continue;
       }
+      verdict = res.verdict;
+      log(
+        `score: ${runConfig.runId}/${taskId}#${attempt} ${verdict.passed ? "PASSED" : "failed"}` +
+          (res.note ? ` (${res.note})` : "") +
+          (verdict.regurgitationFlag ? " [regurgitation]" : ""),
+      );
+    } catch (err) {
+      // Truth missing/unreadable, or an unexpected replay error: nothing we can
+      // honestly say about the agent.
+      unscore(`could not score: ${(err as Error).message}`);
+      continue;
     }
 
     await writeVerdict(repoRoot, runConfig.runId, verdict);
@@ -123,8 +132,8 @@ async function scoreRun(
 /** The single JSON object emitted under `--json` (§4: exactly one, on stdout). */
 function jsonReport(summaries: readonly RunSummary[]): string {
   const totals = summaries.reduce(
-    (t, s) => ({ scored: t.scored + s.scored, passed: t.passed + s.passed, failed: t.failed + s.failed, flagged: t.flagged + s.flagged }),
-    { scored: 0, passed: 0, failed: 0, flagged: 0 },
+    (t, s) => ({ scored: t.scored + s.scored, passed: t.passed + s.passed, failed: t.failed + s.failed, flagged: t.flagged + s.flagged, unscored: t.unscored + s.unscored }),
+    { scored: 0, passed: 0, failed: 0, flagged: 0, unscored: 0 },
   );
   return JSON.stringify({ ...totals, runs: summaries }) + "\n";
 }
@@ -132,14 +141,17 @@ function jsonReport(summaries: readonly RunSummary[]): string {
 /** The human summary printed when `--json` is absent. */
 function humanReport(summaries: readonly RunSummary[]): string {
   const t = summaries.reduce(
-    (a, s) => ({ scored: a.scored + s.scored, passed: a.passed + s.passed, failed: a.failed + s.failed, flagged: a.flagged + s.flagged }),
-    { scored: 0, passed: 0, failed: 0, flagged: 0 },
+    (a, s) => ({ scored: a.scored + s.scored, passed: a.passed + s.passed, failed: a.failed + s.failed, flagged: a.flagged + s.flagged, unscored: a.unscored + s.unscored }),
+    { scored: 0, passed: 0, failed: 0, flagged: 0, unscored: 0 },
   );
   const lines = [
     `guignet score: scored ${t.scored} attempt(s) across ${summaries.length} run(s) — ${t.passed} passed, ${t.failed} failed, ${t.flagged} flagged`,
   ];
+  if (t.unscored > 0) {
+    lines.push(`  ${t.unscored} attempt(s) NOT scored because of an environment problem (see stderr) — excluded from pass/fail; re-run \`guignet score\` to retry`);
+  }
   for (const s of summaries) {
-    lines.push(`  ${s.runId}: ${s.scored} scored (${s.passed} passed, ${s.failed} failed, ${s.flagged} flagged)`);
+    lines.push(`  ${s.runId}: ${s.scored} scored (${s.passed} passed, ${s.failed} failed, ${s.flagged} flagged${s.unscored > 0 ? `, ${s.unscored} NOT scored` : ""})`);
   }
   return lines.join("\n") + "\n";
 }
@@ -170,6 +182,11 @@ export async function runScore(opts: { repoRoot: string; json: boolean; force: b
   // an empty repo and skips any individually-unreadable run config.
   const runConfigs: RunConfig[] = [];
   if (runId !== undefined) {
+    // A run id is a path segment — refuse anything that could escape the runs dir.
+    const idCheck = RunIdSchema.safeParse(runId);
+    if (!idCheck.success) {
+      return { stdout: "", stderr: `score: invalid run id "${runId}": ${idCheck.error.issues[0]?.message ?? "not a safe slug"}\n`, code: EXIT.USAGE };
+    }
     try {
       runConfigs.push(await readRunConfig(repoRoot, runId));
     } catch (err) {
@@ -205,6 +222,9 @@ export async function runScore(opts: { repoRoot: string; json: boolean; force: b
   // No attempt units exist across the selected runs ⇒ nothing to score (§4).
   // A run whose attempts are all already scored (resume) is NOT this case — the
   // units exist, so that path exits OK with `scored: 0`.
-  const code: ExitCode = totalUnits === 0 ? EXIT.SOFT_BLOCKED : EXIT.OK;
+  // An unscored attempt is an environment problem (exit.ts: operational failure,
+  // INCLUDING environment problems) — surface it, don't let it pass for success.
+  const unscoredTotal = summaries.reduce((n, s) => n + s.unscored, 0);
+  const code: ExitCode = unscoredTotal > 0 ? EXIT.FAILURE : totalUnits === 0 ? EXIT.SOFT_BLOCKED : EXIT.OK;
   return { stdout: json ? jsonReport(summaries) : humanReport(summaries), stderr, code };
 }

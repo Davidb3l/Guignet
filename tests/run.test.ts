@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { mapLimit, defaultConcurrency } from "../src/run/pool.ts";
 import { substituteCmd } from "../src/run/adapters/generic-cli.ts";
 import { runRun } from "../src/run/index.ts";
-import { spawnToFile } from "../src/core/proc.ts";
+import { agentEnv, spawnToFile } from "../src/core/proc.ts";
 import { captureWorktreeDiff, git, worktreeAdd } from "../src/core/git.ts";
 import { ConfigSchema, type Task } from "../src/core/schema.ts";
 import { writeConfig, writeSuite, writeTask, attemptDir, readAttempt, writeAttempt } from "../src/core/store.ts";
@@ -108,6 +109,18 @@ describe("spawnToFile", () => {
       alive = false;
     }
     expect(alive).toBe(false);
+  });
+});
+
+// --- agent env: git redirect vars must not reach the agent ---
+
+describe("agentEnv", () => {
+  test("drops git variables that would point the agent's git at another repo; keeps the rest", () => {
+    const env = agentEnv(
+      { GUIGNET_PROMPT: "p" },
+      { PATH: "/bin", GIT_DIR: "/real/.git", GIT_WORK_TREE: "/real", GIT_INDEX_FILE: "/real/.git/index", GIT_COMMON_DIR: "/real/.git", GIT_OBJECT_DIRECTORY: "/o", GIT_ALTERNATE_OBJECT_DIRECTORIES: "/a", GIT_AUTHOR_NAME: "keep" },
+    );
+    expect(env).toEqual({ PATH: "/bin", GIT_AUTHOR_NAME: "keep", GUIGNET_PROMPT: "p" });
   });
 });
 
@@ -247,6 +260,58 @@ describe("runRun end-to-end (generic-cli)", () => {
     expect(diff).toContain("agent-used-dep.txt"); // agent saw the installed dep
   });
 
+  test("leak firewall: the agent's workspace has no path to the fix commit or the source repo", async () => {
+    const { repo, base } = await initRepo();
+    // The held-out fix lands AFTER the base — in the real repo it is just the
+    // next commit, which a linked worktree's `git log --all` would reveal.
+    await writeFile(join(repo, "a.ts"), "export const x = 2; // THE-SECRET-FIX\n");
+    await Bun.spawn(["git", "commit", "-qam", "fix: secret"], { cwd: repo }).exited;
+    const fix = (await git(["rev-parse", "HEAD"], repo)).stdout.trim();
+    expect(fix).not.toBe(base);
+    await seedSuite(repo, base, ["t1"]);
+
+    // The "agent" is a script (kept OUTSIDE the repo) that probes its own cwd.
+    const scriptDir = await tmp();
+    const script = join(scriptDir, "probe.ts").replaceAll("\\", "/");
+    await writeFile(
+      script,
+      `import { existsSync, lstatSync, writeFileSync } from "node:fs";
+       const sh = (a: string[]) => Bun.spawnSync(["git", ...a], { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+       const out = (a: string[]) => sh(a).stdout.toString().trim();
+       writeFileSync("probe.json", JSON.stringify({
+         commits: out(["rev-list", "--all", "--count"]),
+         fixReachable: sh(["cat-file", "-e", ${JSON.stringify(fix)}]).exitCode === 0,
+         dotGitIsDir: lstatSync(".git").isDirectory(),
+         commondir: existsSync(".git/commondir"),
+         remotes: out(["remote"]),
+         worktrees: out(["worktree", "list", "--porcelain"]).split("\\n").filter((l) => l.startsWith("worktree ")).length,
+         a: (await Bun.file("a.ts").text()).replaceAll("\\r\\n", "\\n"),
+       }));`,
+    );
+    const cfg = await writeRunCfg(repo, `bun "${script}"`, 1);
+
+    const run = await runRun({ repoRoot: repo, json: true, force: false, config: cfg });
+    expect(JSON.parse(run.stdout).byExit.completed).toBe(1);
+    const diff = await readFile(join(attemptDir(repo, "2026-07-11-mock", "t1", 1), "solution.diff"), "utf-8");
+    const probeSection = diff.slice(diff.indexOf("probe.json"));
+    const probe = JSON.parse(
+      probeSection
+        .split("\n")
+        .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+        .map((l) => l.slice(1))
+        .join("\n"),
+    );
+    expect(probe.commits).toBe("1");
+    expect(probe.fixReachable).toBe(false);
+    expect(probe.dotGitIsDir).toBe(true);
+    expect(probe.commondir).toBe(false);
+    expect(probe.remotes).toBe("");
+    expect(probe.worktrees).toBe(1);
+    expect(probe.a).toBe("export const x = 1;\n"); // the BASE content, not the fix
+    // The source repo registered no worktree for the agent either.
+    expect((await git(["worktree", "list", "--porcelain"], repo)).stdout.split("\n").filter((l) => l.startsWith("worktree ")).length).toBe(1);
+  });
+
   test("setup churn (tracked AND untracked) is excluded from the solution diff", async () => {
     const { repo } = await initRepo();
     // 'lock.txt' is a committed (tracked) file — like a lockfile setup rewrites.
@@ -302,6 +367,67 @@ describe("runRun end-to-end (generic-cli)", () => {
     const run = await runRun({ repoRoot: repo, json: true, force: false, config: cfg });
     expect(run.code).toBe(0);
     expect(JSON.parse(run.stdout).byExit.crashed).toBe(1);
+  });
+
+  /** Run `fn` while capturing everything written to process.stderr. */
+  async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+    const orig = process.stderr.write.bind(process.stderr);
+    let stderr = "";
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      stderr += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      return { result: await fn(), stderr };
+    } finally {
+      process.stderr.write = orig;
+    }
+  }
+
+  test("an unexpected attempt error is logged with its task id, counted, and fails the run (not swallowed)", async () => {
+    const { repo, base } = await initRepo();
+    await seedSuite(repo, base, ["t1", "t2"]);
+    // Sabotage t1: a FILE where its attempts dir must be makes runOneAttempt's
+    // mkdir throw (it never reaches the adapter) — the "unexpected error" path.
+    const sabotage = join(repo, ".guignet", "runs", "2026-07-11-mock", "attempts");
+    await mkdir(sabotage, { recursive: true });
+    await writeFile(join(sabotage, "t1"), "not a directory");
+    const cfg = await writeRunCfg(repo, "echo x > f.txt", 1);
+
+    const { result: run, stderr } = await captureStderr(() => runRun({ repoRoot: repo, json: true, force: false, config: cfg }));
+    const out = JSON.parse(run.stdout);
+    expect(run.code).toBe(1); // non-zero: the run is incomplete
+    expect(out.errored).toBe(1);
+    expect(out.attempted).toBe(1); // t2 still ran — one bad unit doesn't abort the pool
+    expect(stderr).toContain("t1#1 errored");
+    // The errored unit wrote no attempt.json, so a resume retries exactly it.
+    await expect(readAttempt(repo, "2026-07-11-mock", "t1", 1)).rejects.toBeTruthy();
+    expect((await readAttempt(repo, "2026-07-11-mock", "t2", 1)).exit).toBe("completed");
+  });
+
+  test("a suite task whose task.json is unreadable is logged and counted, not silently skipped", async () => {
+    const { repo, base } = await initRepo();
+    await seedSuite(repo, base, ["t1"]);
+    await writeSuite(repo, { taskIds: ["t1", "ghost"], soundnessRate: { admitted: 2, candidates: 2 }, minedAt: new Date().toISOString() });
+    const cfg = await writeRunCfg(repo, "echo x > f.txt", 1);
+
+    const { result: run, stderr } = await captureStderr(() => runRun({ repoRoot: repo, json: true, force: false, config: cfg }));
+    const out = JSON.parse(run.stdout);
+    expect(out.unreadableTasks).toBe(1);
+    expect(out.attempted).toBe(1);
+    expect(run.code).toBe(1);
+    expect(stderr).toContain("ghost");
+  });
+
+  test("an unsafe runId in the run config is rejected before anything is written", async () => {
+    const { repo, base } = await initRepo();
+    await seedSuite(repo, base, ["t1"]);
+    const cfg = join(repo, "bad-run.json");
+    await writeFile(cfg, JSON.stringify({ runId: "../escape", adapter: "generic-cli", nAttempts: 1, genericCli: { cmd: "true" } }));
+    const run = await runRun({ repoRoot: repo, json: true, force: false, config: cfg });
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain("invalid run config");
+    expect(existsSync(join(repo, ".guignet", "escape"))).toBe(false);
   });
 
   test("no --config is a usage error; empty suite soft-blocks", async () => {

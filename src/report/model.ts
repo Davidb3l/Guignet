@@ -70,6 +70,17 @@ export interface ConfigReport {
    * only meaningful pre-cutoff, but the overlay is era-independent). */
   testEditsFilteredCount: number;
   testEditsFilteredRate: number | null;
+
+  /** Attempts with NO verdict on disk — not yet scored, or left unscored by
+   * `score` because of an environment problem (score/index.ts). They are
+   * neither passes nor failures. */
+  attemptsUnscored: number;
+  /** Tasks whose outcome is undetermined: no attempt passed AND at least one
+   * attempt is unscored (it might have solved the task). These are EXCLUDED from
+   * tasksTotal/tasksSolved/solveRate/CI — counting them as failures would charge
+   * the agent for our environment. A task already solved by a scored attempt
+   * stays in (resolve@n only needs one pass). */
+  tasksUnresolved: number;
 }
 
 /** One cell of the kind × area heatmap (for the primary config). */

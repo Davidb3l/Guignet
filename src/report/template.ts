@@ -76,7 +76,7 @@ function headlineStrip(configs: ConfigReport[]): string {
   return `<section class="headline reveal">
     <div class="hl-label">$ per solved task · headline config</div>
     <div class="hl-number">${prefix}${esc(money(top.dollarsPerSolvedTask))}</div>
-    <div class="hl-sub"><span class="mono">${esc(top.label)}</span> — solved <span class="mono">${top.tasksSolved}</span> of <span class="mono">${top.tasksTotal}</span> tasks${partial ? ` <span class="hl-partial">lower bound · ${top.dollarsCoverage.known}/${top.dollarsCoverage.total} attempts priced</span>` : ""}${top.watermarked ? ` <span class="watermark">n=1 · anecdote, not measurement</span>` : ""}</div>
+    <div class="hl-sub"><span class="mono">${esc(top.label)}</span> — solved <span class="mono">${top.tasksSolved}</span> of <span class="mono">${top.tasksTotal}</span> tasks${partial ? ` <span class="hl-partial">lower bound · ${top.dollarsCoverage.known}/${top.dollarsCoverage.total} attempts priced</span>` : ""}${top.watermarked ? ` <span class="watermark">n=1 · anecdote, not measurement</span>` : ""}${top.attemptsUnscored > 0 ? ` <span class="hl-partial">${top.attemptsUnscored} attempt(s) unscored · ${top.tasksUnresolved} task(s) undetermined, excluded</span>` : ""}</div>
   </section>`;
 }
 
@@ -265,9 +265,21 @@ function flagsAndSoundness(model: ReportModel): string {
     </div>`,
     )
     .join("");
+  // Attempts with no verdict are neither passes nor failures: disclose them, and
+  // the tasks they leave undetermined (excluded from the solve rate).
+  const unscored = model.configs
+    .filter((c) => c.attemptsUnscored > 0)
+    .map(
+      (c) => `<div class="tile">
+      <div class="tile-label">unscored · <span class="mono">${esc(c.model)}</span></div>
+      <div class="tile-num mono flag">${c.attemptsUnscored}</div>
+      <div class="tile-sub mono">attempt(s) without a verdict (not yet scored, or an environment problem) · ${c.tasksUnresolved} task(s) undetermined and excluded from the solve rate</div>
+    </div>`,
+    )
+    .join("");
   return `<section class="reveal">
     <h2>Integrity</h2>
-    <div class="tiles">${soundness}${flags}${filtered}</div>
+    <div class="tiles">${soundness}${flags}${filtered}${unscored}</div>
   </section>`;
 }
 

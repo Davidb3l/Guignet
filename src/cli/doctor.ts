@@ -10,9 +10,11 @@
  * file, not a served UI (§3.2). The CLI layer owns process I/O and exit codes;
  * everything here is pure and directly testable.
  *
- * Capabilities are advertised only when the feature exists TODAY. At M0 Guignet
- * has no interop capabilities (`events.emit` lands in M4), so it advertises an
- * empty list — honest, and still a valid handshake.
+ * Capabilities are advertised only when the feature exists TODAY. Guignet emits
+ * past-tense facts to the suite event spine (core/events.ts: `suite.mined`,
+ * `task.admitted`, `run.completed`, `report.generated`), so it advertises
+ * `events.emit`. (Emission is gated per-repo by config `spine`; the capability
+ * is that the tool CAN emit, not that this particular repo has it switched on.)
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -21,8 +23,8 @@ import { configPath, isInitialized, readConfig, storeRoot } from "../core/store.
 
 export const SCHEMA_VERSION = 1;
 
-/** Interop capabilities Guignet implements today. Empty at M0 (see header). */
-export const CAPABILITIES: readonly string[] = [];
+/** Interop capabilities Guignet implements today (see header). */
+export const CAPABILITIES: readonly string[] = ["events.emit"];
 
 /** One §3 check row plus whether it gates overall health. */
 export interface DoctorCheck {

@@ -90,7 +90,7 @@ async function aggregateRun(
     try {
       verdict = await readVerdict(repoRoot, runId, taskId, attempt);
     } catch {
-      verdict = null; // unscored attempt — counts as not-passed
+      verdict = null; // unscored attempt — neither passed nor failed (see tasksUnresolved)
     }
     const g = byTask.get(taskId) ?? { attempts: [], verdicts: [] };
     g.attempts.push(att);
@@ -101,6 +101,7 @@ async function aggregateRun(
   }
 
   const rollups: TaskRollup[] = [];
+  let tasksUnresolved = 0;
   for (const [taskId, g] of byTask) {
     let task = taskCache.get(taskId);
     if (!task) {
@@ -112,8 +113,14 @@ async function aggregateRun(
       taskCache.set(taskId, task);
     }
     const solved = g.verdicts.some((v) => v.passed);
+    // Undetermined: nothing passed and some attempt has no verdict — it might
+    // have solved the task, so don't count the task as a failure.
+    if (!solved && g.verdicts.length < g.attempts.length) {
+      tasksUnresolved++;
+      continue;
+    }
     // Prefer the verdict's era (computed by score with this run's model);
-    // fall back to classifying the task date if unscored.
+    // fall back to classifying the task date when the verdicts carry none.
     const era: CutoffEra = g.verdicts[0]?.cutoffEra ?? classifyEra(task.date, cutoffDate);
     rollups.push({ task, solved, era });
   }
@@ -160,6 +167,8 @@ async function aggregateRun(
     flagRate: preCutoffAttempts > 0 ? flaggedCount / preCutoffAttempts : null,
     testEditsFilteredCount,
     testEditsFilteredRate: allVerdicts.length > 0 ? testEditsFilteredCount / allVerdicts.length : null,
+    attemptsUnscored: allAttempts.length - allVerdicts.length,
+    tasksUnresolved,
   };
   return { report, rollups, attemptCount: allAttempts.length };
 }

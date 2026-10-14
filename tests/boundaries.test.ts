@@ -151,3 +151,18 @@ describe("firewall enforcement (synthetic trees)", () => {
     expect(await scanTree(src)).toEqual([]);
   });
 });
+
+describe("path normalization (Windows backslash paths)", () => {
+  test("a src path with no trailing slash, or backslash separators, still enforces the firewall", async () => {
+    const src = await tree({
+      "core/truth.ts": "export function readTruth(){}",
+      "run/index.ts": `import { readTruth } from "../core/truth.ts";`,
+    });
+    const bare = src.slice(0, -1);
+    const variants = process.platform === "win32" ? [bare, bare.replaceAll("/", "\\")] : [bare];
+    for (const dir of variants) {
+      const v = await scanTree(dir);
+      expect(v.some((x) => x.file === "run/index.ts" && x.rule.includes("core/truth"))).toBe(true);
+    }
+  });
+});

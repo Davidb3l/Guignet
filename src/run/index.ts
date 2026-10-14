@@ -3,7 +3,7 @@
  *
  * Reads `suite.json` (the gate's admitted tasks) and a run config (which model,
  * adapter, budget, nAttempts), then runs N attempts per task in a bounded pool
- * of disposable worktrees. Idempotent + resumable: an attempt whose
+ * of disposable isolated workspaces. Idempotent + resumable: an attempt whose
  * `attempt.json` already exists is skipped unless `--force`, so a run killed at
  * attempt 23 of 69 resumes at 23, not 0 (§2 — engagements run overnight).
  *
@@ -50,6 +50,12 @@ interface RunResult {
   /** Units NOT started because maxTotalDollars was reached. They have no
    * attempt.json, so a resume (with a raised cap) runs exactly these. */
   budgetCapped: number;
+  /** Units whose attempt threw an unexpected error (logged to stderr with the
+   * task id). They wrote NO attempt.json, so a resume retries exactly these —
+   * and the run exits non-zero so the failure can't pass for success. */
+  errored: number;
+  /** Suite task ids whose task.json could not be read (logged, not run). */
+  unreadableTasks: number;
   byExit: Record<string, number>;
   dollars: number | null; // summed where known, THIS invocation only
   /** All-time spend the cap was judged against (prior attempts + this
@@ -134,13 +140,19 @@ export async function runRun(opts: {
   const tasks = new Map<string, Task>();
   const units: Unit[] = [];
   let skipped = 0;
+  let unreadableTasks = 0;
   for (const taskId of [...new Set(taskIds)]) {
     let task = tasks.get(taskId);
     if (!task) {
       try {
         task = await readTask(repoRoot, taskId);
-      } catch {
-        continue; // a task named in the suite but unreadable on disk — skip it
+      } catch (err) {
+        // A task named in the suite but unreadable on disk: it can't run, but
+        // the operator must hear about it — a silently shorter run is a lie.
+        unreadableTasks++;
+        process.stderr.write(`run: skipping task ${taskId} — cannot read it: ${(err as Error).message}
+`);
+        continue;
       }
       tasks.set(taskId, task);
     }
@@ -151,7 +163,7 @@ export async function runRun(opts: {
   }
 
   const concurrency = runConfig.maxConcurrency ?? defaultConcurrency();
-  const result: RunResult = { runId: runConfig.runId, attempted: 0, skipped, budgetCapped: 0, byExit: {}, dollars: null, spentDollars: null };
+  const result: RunResult = { runId: runConfig.runId, attempted: 0, skipped, budgetCapped: 0, errored: 0, unreadableTasks, byExit: {}, dollars: null, spentDollars: null };
 
   // The spend cap is resume-aware: attempts already persisted (this run,
   // earlier invocations) count against it, so re-invoking a capped run never
@@ -188,13 +200,17 @@ export async function runRun(opts: {
         return "budget-capped" as const;
       }
       // runOneAttempt records a crashed attempt rather than throwing, but guard
-      // anyway so one unexpected error can't abort the whole pool.
+      // anyway so one unexpected error can't abort the whole pool. The error is
+      // NOT swallowed: it is logged with the task id and counted, and the run
+      // exits non-zero (the unit has no attempt.json, so a resume retries it).
       try {
         const att = await runOneAttempt(repoRoot, runConfig, adapter, u.task, u.attemptNum, env);
         spent += att.dollars ?? 0;
         return att;
-      } catch {
-        return null;
+      } catch (err) {
+        process.stderr.write(`run: ${u.task.id}#${u.attemptNum} errored: ${(err as Error).stack ?? (err as Error).message}
+`);
+        return "errored" as const;
       }
     },
     // Host-citizenship admission (core/host.ts): hold ADDITIONAL concurrency
@@ -209,6 +225,10 @@ export async function runRun(opts: {
 
   for (const att of attempts) {
     if (!att) continue;
+    if (att === "errored") {
+      result.errored++;
+      continue;
+    }
     if (att === "budget-capped") {
       result.budgetCapped++;
       continue;
@@ -227,12 +247,16 @@ export async function runRun(opts: {
     attempted: result.attempted,
   });
 
-  const code: ExitCode = EXIT.OK;
+  // Errored units / unreadable tasks mean the run is INCOMPLETE for a reason
+  // other than the spend cap: report failure (a resume retries the errored units).
+  const code: ExitCode = result.errored > 0 || result.unreadableTasks > 0 ? EXIT.FAILURE : EXIT.OK;
   if (json) return { stdout: JSON.stringify(result) + "\n", stderr: "", code };
   const lines = [
     `guignet run ${result.runId}: ran ${result.attempted} attempt(s), skipped ${result.skipped} (resume).`,
     `  by exit: ${Object.entries(result.byExit).map(([k, v]) => `${k}=${v}`).join(", ") || "none"}`,
   ];
+  if (result.errored > 0) lines.push(`  ERRORED: ${result.errored} attempt(s) hit an unexpected error (see stderr) — re-run to retry them`);
+  if (result.unreadableTasks > 0) lines.push(`  SKIPPED: ${result.unreadableTasks} suite task(s) could not be read (see stderr)`);
   if (result.dollars !== null) lines.push(`  total cost: $${result.dollars.toFixed(4)}`);
   if (result.budgetCapped > 0) {
     lines.push(

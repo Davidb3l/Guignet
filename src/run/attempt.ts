@@ -1,10 +1,13 @@
 /**
- * One attempt's lifecycle (ARCHITECTURE.md §5). Owns a disposable worktree from
- * base to teardown: create it at the task's base commit, let the adapter drive
- * the agent inside it, capture what changed (diff) and what it cost (from the
- * adapter's transcript), persist everything, and always remove the worktree.
- * The runner never pushes and never touches the real checkout — all work is in
- * throwaway worktrees.
+ * One attempt's lifecycle (ARCHITECTURE.md §5). Owns a disposable ISOLATED
+ * workspace from base to teardown: export the task's base commit into a fresh
+ * temp directory as a single-commit repo (no object-store or `.git` link back to
+ * the target repo — the leak firewall, METHODOLOGY.md §1), let the adapter drive
+ * the agent inside it, capture what changed (diff vs that root commit) and what
+ * it cost (from the adapter's transcript), persist everything, and always
+ * remove the workspace. The runner never pushes and never touches the real
+ * checkout. Scoring later applies the captured diff to Guignet's own worktree
+ * at the same base commit, so the diff is the only thing that crosses over.
  */
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
@@ -23,7 +26,7 @@ import {
   type Task,
 } from "../core/index.ts";
 import type { Adapter } from "./adapters/types.ts";
-import { safeWorktreeAdd, safeWorktreeRemove } from "./worktree.ts";
+import { createAgentWorkspace } from "./worktree.ts";
 
 /** The target-repo environment an attempt needs: where the package root is,
  * how to install its deps, and how long to allow for that. */
@@ -84,9 +87,11 @@ export async function runOneAttempt(
   };
 
   try {
-    // Serialized + retried so a transient worktree lock race isn't mislabeled
-    // as an agent crash (§ review #3).
-    if (!(await safeWorktreeAdd(repoRoot, task.baseSha, worktreeDir))) {
+    // An isolated single-commit export, NOT a linked worktree (see worktree.ts).
+    // Retried so a transient filesystem hiccup isn't mislabeled as an agent crash.
+    const wsError = await createAgentWorkspace(repoRoot, task.baseSha, worktreeDir);
+    if (wsError !== null) {
+      process.stderr.write(`run: ${task.id}#${attemptNum}: could not create the agent workspace at ${task.baseSha.slice(0, 10)}: ${wsError}\n`);
       return await record("crashed", "", null, null, 0);
     }
 
@@ -142,7 +147,6 @@ export async function runOneAttempt(
     const cost = await adapter.parseCost(tDir);
     return await record(exit, diff, cost?.tokens ?? null, cost?.dollars ?? null, wallclockMs);
   } finally {
-    await safeWorktreeRemove(repoRoot, worktreeDir);
     await rm(tmp, { recursive: true, force: true });
   }
 }

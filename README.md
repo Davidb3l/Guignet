@@ -2,8 +2,10 @@
 
 **The referee.** Point it at your repository and it mines your own git history
 into replayable, validity-checked tasks, runs any model / agent / config
-against them in isolated worktrees — entirely locally — and hands you the only
+against them in isolated workspaces — entirely locally — and hands you the only
 leaderboard that matters: *on your code*.
+
+Part of **[Sothis](https://github.com/Davidb3l/Sothis)**, the local-first suite for running a fleet of AI coding agents on one repo.
 
 Public benchmarks are saturated and measured on other people's repos; eval SaaS
 requires uploading private code. Guignet is local-first by category, not by
@@ -33,9 +35,13 @@ CLI contracts are stable, hardening continues.
 2. **`gate`** admits a task only after replaying it in a clean worktree: the
    verifier must fail at base and pass at the real fix, k times each. Flaky
    tasks are discarded, never patched. The **soundness rate** is published.
-3. **`run`** executes N attempts per task (default 3) in disposable worktrees,
-   through an adapter (`claude-code` or the `generic-cli` escape hatch). Cost is
-   parsed from the harness's own transcript, never self-reported.
+3. **`run`** executes N attempts per task (default 3), each in a disposable
+   workspace that holds only the base commit's files as a single-commit repo —
+   no link back to your repo's history or object store, so the agent can't
+   `git log` its way to the held-out fix — through an adapter (`claude-code` or
+   the `generic-cli` escape hatch). Cost is parsed from the harness's own
+   transcript, never self-reported. (The agent still runs with your user's full
+   filesystem access; see METHODOLOGY for what isolation does and doesn't mean.)
 4. **`score`** applies each solution over the held-out verifier — binary,
    judge-free — and computes contamination controls (cutoff split, regurgitation
    flags) and secondary metrics.
@@ -82,7 +88,9 @@ priority demotion (BELOW_NORMAL class, direct child), and memory gate
 the CPU load gate is unavailable by construction (`os.loadavg()` is zero on
 Windows) and the full pipeline isn't yet exercised by Windows CI beyond a
 core-unit job. `guignet doctor` says this on Windows so nobody finds out
-mid-benchmark.
+mid-benchmark. On native Windows, `mine` discards (with a recorded reason) any
+task whose test path contains a `cmd.exe` metacharacter (`"` `%` `&` `|` `<`
+`>` `^` `!`) rather than build an injectable verifier command from it.
 
 ## Quickstart
 
@@ -121,8 +129,20 @@ resume-aware: attempts already on disk count against it — except under
 `--force`, where every attempt is being replaced, so the cap budgets the
 fresh re-run alone.
 
+`runId` is a path segment, so it must be a plain slug (letters, digits, `.`,
+`_`, `-`; no `..`). `guignet --version` (or `guignet version`) prints
+`guignet <version>`.
+
 Every command accepts `--json` (exactly one JSON object on stdout). Exit codes:
-`0` ok · `1` failure · `2` usage · `3` soft-blocked.
+`0` ok · `1` failure · `2` usage · `3` soft-blocked. `run` exits `1` if any
+attempt hit an unexpected error or a suite task couldn't be read (both are
+logged to stderr; a re-run retries the errored attempts). `score` exits `1` if
+any attempt couldn't be judged because of an *environment* problem (missing
+task/truth, worktree or setup failure, verifier couldn't launch): such attempts
+get **no** verdict — they are neither pass nor fail, are excluded from solve
+rates (the report lists them as unscored), and the next `score` retries them.
+A failure that is the agent's — a diff that won't apply, a failing or hanging
+verifier — is still a stored fail.
 
 ## Config reference
 
