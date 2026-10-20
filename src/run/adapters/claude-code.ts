@@ -3,8 +3,10 @@
  * inside a worktree and read its OWN result JSON for cost.
  *
  * Invocation (verified against claude 2.1.198):
- *   claude -p "<prompt>" --output-format json --dangerously-skip-permissions [--model <m>]
- * run with cwd = worktreePath. `-p` is headless; `--output-format json` prints
+ *   <prompt on STDIN> | claude -p --output-format json --dangerously-skip-permissions [--model <m>]
+ * run with cwd = worktreePath. The prompt goes on stdin, never argv: mined task
+ * text routinely starts with `-` (a markdown list item) and would be parsed as
+ * a flag, and argv has length/quoting limits stdin doesn't. `-p` is headless; `--output-format json` prints
  * exactly one JSON result object to stdout at the end; skip-permissions is
  * REQUIRED so the agent edits files without an interactive prompt. The agent
  * mutates the worktree directly — we never parse a diff; the RUNNER captures the
@@ -40,12 +42,12 @@ interface ClaudeResult {
   };
 }
 
-/** Build the argv. `--model` is appended only when a model id was supplied. */
+/** Build the argv (the prompt is NOT in it — see `attempt`, which pipes it on
+ * stdin). `--model` is appended only when a model id was supplied. */
 export function buildArgv(input: AttemptInput): string[] {
   const argv = [
     "claude",
     "-p",
-    input.prompt,
     "--output-format",
     "json",
     "--dangerously-skip-permissions",
@@ -117,6 +119,7 @@ export async function attempt(input: AttemptInput): Promise<{ exit: AttemptExit 
     stderrPath: join(input.transcriptDir, STDERR_FILE),
     timeoutMs,
     priority: input.priority,
+    stdin: input.prompt,
   });
 
   if (timedOut) return { exit: "budget-exhausted" };

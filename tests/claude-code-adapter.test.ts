@@ -129,7 +129,6 @@ describe("buildArgv", () => {
     expect(buildArgv(base)).toEqual([
       "claude",
       "-p",
-      "fix the bug",
       "--output-format",
       "json",
       "--dangerously-skip-permissions",
@@ -142,9 +141,9 @@ describe("buildArgv", () => {
     expect(buildArgv(base)).not.toContain("--model");
   });
 
-  test("passes the prompt as a single arg (no shell splitting)", () => {
-    const argv = buildArgv({ ...base, prompt: 'weird "quoted" & $prompt' });
-    expect(argv[2]).toBe('weird "quoted" & $prompt');
+  test("the prompt is never in argv (it is piped on stdin)", () => {
+    const argv = buildArgv({ ...base, prompt: "- leading dash" });
+    expect(argv.join(" ")).not.toContain("leading dash");
   });
 });
 
@@ -160,4 +159,81 @@ describe("detect", () => {
     expect(claudeCodeAdapter.name).toBe("claude-code");
     expect(typeof (await claudeCodeAdapter.detect())).toBe("boolean");
   });
+});
+
+describe("attempt: the prompt travels on stdin, never argv", () => {
+  // HERMETIC: a fake `claude` shim goes FIRST on PATH; it records argv + stdin
+  // via a tiny bun script and prints a minimal success result. Real claude is
+  // never invoked.
+  const FAKE_TS = `
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+const dir = dirname(import.meta.path);
+const chunks: Uint8Array[] = [];
+for await (const c of Bun.stdin.stream()) chunks.push(c);
+writeFileSync(join(dir, "stdin.bin"), Buffer.concat(chunks));
+writeFileSync(join(dir, "argv.json"), JSON.stringify(process.argv.slice(2)));
+process.stdout.write(JSON.stringify({ is_error: false, total_cost_usd: 0.01, usage: { input_tokens: 1, output_tokens: 1 } }));
+`;
+
+  async function withFakeClaude<T>(fn: (fakeDir: string) => Promise<T>): Promise<T> {
+    const fakeDir = await mkdtemp(join(tmpdir(), "guignet-fake-claude-"));
+    dirs.push(fakeDir);
+    await writeFile(join(fakeDir, "fake.ts"), FAKE_TS, "utf-8");
+    const bun = process.execPath;
+    if (process.platform === "win32") {
+      await writeFile(join(fakeDir, "claude.cmd"), `@"${bun}" "%~dp0fake.ts" %*\r\n`, "utf-8");
+    } else {
+      const { chmod } = await import("node:fs/promises");
+      await writeFile(join(fakeDir, "claude"), `#!/bin/sh\nexec "${bun}" "$(dirname "$0")/fake.ts" "$@"\n`, "utf-8");
+      await chmod(join(fakeDir, "claude"), 0o755);
+    }
+    const key = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+    const savedPath = process.env[key];
+    process.env[key] = fakeDir + (process.platform === "win32" ? ";" : ":") + (savedPath ?? "");
+    try {
+      return await fn(fakeDir);
+    } finally {
+      if (savedPath === undefined) delete process.env[key];
+      else process.env[key] = savedPath;
+    }
+  }
+
+  async function runAttempt(prompt: string, extra: Partial<AttemptInput> = {}) {
+    return withFakeClaude(async (fakeDir) => {
+      const td = await transcriptDir();
+      const wt = await transcriptDir();
+      const res = await claudeCodeAdapter.attempt({
+        prompt,
+        worktreePath: wt,
+        transcriptDir: td,
+        budget: { maxSeconds: 60 },
+        priority: "normal",
+        ...extra,
+      });
+      const { readFile } = await import("node:fs/promises");
+      return {
+        res,
+        stdin: await readFile(join(fakeDir, "stdin.bin")),
+        argv: JSON.parse(await readFile(join(fakeDir, "argv.json"), "utf-8")) as string[],
+      };
+    });
+  }
+
+  test("a leading-dash multi-line prompt arrives byte-for-byte on stdin and never in argv", async () => {
+    const prompt = "- leading dash prompt\nsecond line\n--also-looks-like-a-flag \"quoted\" & $x\n";
+    const { res, stdin, argv } = await runAttempt(prompt, { model: "opus" });
+    expect(res.exit).toBe("completed");
+    expect(Buffer.compare(stdin, Buffer.from(prompt, "utf-8"))).toBe(0);
+    expect(argv.join("\n")).not.toContain("leading dash");
+    expect(argv).toEqual(["-p", "--output-format", "json", "--dangerously-skip-permissions", "--model", "opus"]);
+  });
+
+  test("a 1 MB prompt is delivered whole, stdin is closed (no hang)", async () => {
+    const prompt = "- " + "x".repeat(1024 * 1024) + "\n";
+    const { res, stdin } = await runAttempt(prompt);
+    expect(res.exit).toBe("completed");
+    expect(stdin.length).toBe(Buffer.byteLength(prompt));
+    expect(Buffer.compare(stdin, Buffer.from(prompt, "utf-8"))).toBe(0);
+  }, 30_000);
 });

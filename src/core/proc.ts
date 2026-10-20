@@ -78,6 +78,11 @@ export interface SpawnToFileOptions {
    * contract. Leave unset for real argv arrays (e.g. the claude-code adapter),
    * where the default escaping is exactly right. Ignored on POSIX. */
   windowsVerbatimArguments?: boolean;
+  /** Text fed to the process's stdin, which is then closed (EOF). Omit for no
+   * stdin at all (closed/ignored). Handed to the runtime as a buffer, so a large
+   * payload is written by the runtime concurrently with the process running —
+   * output goes straight to files, so there is no pipe to deadlock on. */
+  stdin?: string;
 }
 
 /**
@@ -124,7 +129,7 @@ export async function spawnToFile(
     proc = Bun.spawn(buildPriorityArgv(argv, opts.priority ?? "low"), {
       cwd: opts.cwd,
       env: agentEnv(opts.env),
-      stdin: "ignore",
+      stdin: opts.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : "ignore",
       stdout: outFh.fd,
       stderr: errFh.fd,
       ...(opts.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
