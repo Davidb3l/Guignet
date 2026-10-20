@@ -442,3 +442,66 @@ describe("runRun end-to-end (generic-cli)", () => {
     expect(empty.code).toBe(3);
   });
 });
+
+// --- re-running an attempt invalidates its old verdict ---
+
+describe("runOneAttempt and stale verdicts", () => {
+  test("a re-run attempt drops the verdict scored from the previous solution", async () => {
+    const { runOneAttempt } = await import("../src/run/attempt.ts");
+    const { writeVerdict, verdictExists } = await import("../src/core/store.ts");
+    const repo = await tmp();
+    const must = async (args: string[]) => {
+      const r = await git(args, repo);
+      if (!r.ok) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    await must(["init", "-q"]);
+    await must(["config", "user.email", "t@t.co"]);
+    await must(["config", "user.name", "t"]);
+    await must(["config", "commit.gpgsign", "false"]);
+    await writeFile(join(repo, "a.txt"), "base\n");
+    await must(["add", "-A"]);
+    await must(["commit", "-qm", "base"]);
+    const baseSha = await must(["rev-parse", "HEAD"]);
+
+    const task: Task = {
+      id: "t1",
+      prompt: "p",
+      baseSha,
+      sourceSha: baseSha,
+      date: "2025-01-01T00:00:00Z",
+      taxonomy: { kind: "bugfix", size: { lines: 1, files: 1 }, areas: [] },
+      verifierCmd: "true",
+      discoveredBy: ["conventional"],
+    };
+    const runConfig = { runId: "r1", adapter: "generic-cli" as const, nAttempts: 1 };
+    const adapter = {
+      name: "generic-cli" as const,
+      detect: async () => true,
+      attempt: async (input: { worktreePath: string }) => {
+        await writeFile(join(input.worktreePath, "a.txt"), "changed by agent\n");
+        return { exit: "completed" as const };
+      },
+      parseCost: async () => null,
+    };
+
+    // A stale verdict from a previous solution already sits on disk.
+    await writeVerdict(repo, "r1", {
+      taskId: "t1",
+      attempt: 1,
+      passed: true,
+      bloatRatio: null,
+      similarity: null,
+      regurgitationFlag: false,
+      cutoffEra: "unknown",
+      testEditsFiltered: false,
+    });
+    expect(verdictExists(repo, "r1", "t1", 1)).toBe(true);
+
+    await runOneAttempt(repo, runConfig, adapter, task, 1, { setupTimeoutMs: 1000 });
+
+    expect(existsSync(join(attemptDir(repo, "r1", "t1", 1), "attempt.json"))).toBe(true);
+    expect(await readFile(join(attemptDir(repo, "r1", "t1", 1), "solution.diff"), "utf-8")).toContain("changed by agent");
+    expect(verdictExists(repo, "r1", "t1", 1)).toBe(false);
+  });
+});

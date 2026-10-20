@@ -13,6 +13,7 @@
  * (core/host.ts): benchmark work is background work, and it must never take
  * the machine away from the user running it.
  */
+import { GIT_REDIRECT_VARS } from "./git.ts";
 import { buildPriorityArgv, demotePriority, type SpawnPriority } from "./host.ts";
 
 /**
@@ -77,19 +78,12 @@ export interface SpawnToFileOptions {
    * contract. Leave unset for real argv arrays (e.g. the claude-code adapter),
    * where the default escaping is exactly right. Ignored on POSIX. */
   windowsVerbatimArguments?: boolean;
+  /** Text fed to the process's stdin, which is then closed (EOF). Omit for no
+   * stdin at all (closed/ignored). Handed to the runtime as a buffer, so a large
+   * payload is written by the runtime concurrently with the process running —
+   * output goes straight to files, so there is no pipe to deadlock on. */
+  stdin?: string;
 }
-
-/** Git env vars that redirect git to a DIFFERENT repository than the cwd's. */
-const GIT_REDIRECT_VARS = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-];
 
 /**
  * The environment an agent process runs with: ours, plus `extra`, minus any git
@@ -135,7 +129,7 @@ export async function spawnToFile(
     proc = Bun.spawn(buildPriorityArgv(argv, opts.priority ?? "low"), {
       cwd: opts.cwd,
       env: agentEnv(opts.env),
-      stdin: "ignore",
+      stdin: opts.stdin !== undefined ? new TextEncoder().encode(opts.stdin) : "ignore",
       stdout: outFh.fd,
       stderr: errFh.fd,
       ...(opts.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
@@ -235,7 +229,9 @@ export async function runShell(cmd: string, opts: ShellOptions): Promise<ShellRe
   try {
     proc = Bun.spawn(buildPriorityArgv(shellArgv(cmd), opts.priority ?? "low"), {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      // Same GIT_* scrub as agents: a verifier run from a git hook must not have
+      // its own git calls redirected to the hook's repository.
+      env: agentEnv(opts.env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

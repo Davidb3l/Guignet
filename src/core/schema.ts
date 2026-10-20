@@ -94,7 +94,11 @@ export const ConfigSchema = z.object({
       priority: z.enum(["low", "normal"]).default("low"),
       maxLoadPerCore: z.number().positive().default(1.5),
     })
-    .default({}),
+    // `prefault`, not `default`: Zod 4's `.default()` returns its literal WITHOUT
+    // parsing it, which would leave `host` as `{}` with the inner priority /
+    // maxLoadPerCore defaults unapplied. `.prefault()` feeds the value through the
+    // schema (the Zod 3 `.default()` behavior), so stored configs read the same.
+    .prefault({}),
   /**
    * Suite event-spine emission (SUITE_CONTRACTS §2 + ARCHITECTURE.md §13).
    * "auto" (default) emits only when the target repo already has `.suite/`, so

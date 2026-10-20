@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   captureWorktreeDiff,
   git,
+  removeVerdict,
   runShell,
   transcriptDir as transcriptDirFor,
   writeAttempt,
@@ -81,6 +82,9 @@ export async function runOneAttempt(
     wallclockMs: number,
   ): Promise<Attempt> => {
     const att: Attempt = { taskId: task.id, attempt: attemptNum, wallclockMs, tokens, dollars, exit };
+    // A re-run (`run --force`) replaces the solution, so any verdict scored from
+    // the OLD one is stale — drop it before the new attempt becomes visible.
+    await removeVerdict(repoRoot, runConfig.runId, task.id, attemptNum);
     await writeSolutionDiff(repoRoot, runConfig.runId, task.id, attemptNum, diff);
     await writeAttempt(repoRoot, runConfig.runId, att);
     return att;

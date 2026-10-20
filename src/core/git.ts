@@ -15,16 +15,48 @@ export interface GitResult {
   code: number | null;
 }
 
+/** Git env vars that redirect git to a DIFFERENT repository than the cwd's. */
+export const GIT_REDIRECT_VARS: readonly string[] = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_COMMON_DIR",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+  "GIT_PREFIX",
+];
+
+/**
+ * `base` (default: this process's environment) minus every variable in
+ * GIT_REDIRECT_VARS, then `extra` merged over it. git exports `GIT_DIR` (and
+ * friends) to hooks, so a Guignet launched from a hook would otherwise have every
+ * git call it makes — including `git init/config/add/commit` inside a fresh
+ * agent workspace — silently act on the hook's repository instead of its cwd.
+ * Explicit `extra` entries (e.g. the export's own `GIT_INDEX_FILE`) are kept.
+ * Names are matched case-insensitively (Windows env names are).
+ */
+export function cleanGitEnv(
+  extra?: Record<string, string>,
+  base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const drop = new Set(GIT_REDIRECT_VARS);
+  const env: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(base)) if (!drop.has(k.toUpperCase())) env[k] = v;
+  return { ...env, ...extra };
+}
+
 /**
  * Run `git <args...>` in `cwd`. Never throws — inspect `ok`/`code`. `env` is
  * merged over the current environment (used by the isolated-workspace builder
- * to pin author/committer identity and dates).
+ * to pin author/committer identity and dates). Repo-redirecting GIT_* variables
+ * in the inherited environment are dropped (see cleanGitEnv).
  */
 export async function git(args: string[], cwd: string, env?: Record<string, string>): Promise<GitResult> {
   try {
     const proc = Bun.spawn(["git", ...args], {
       cwd,
-      ...(env ? { env: { ...process.env, ...env } } : {}),
+      env: cleanGitEnv(env),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -61,7 +93,7 @@ export async function repoRoot(dir: string): Promise<string | null> {
 /** Run `git <args...>` in `cwd`, feeding `stdin` to the process (for `git apply`). */
 export async function gitStdin(args: string[], cwd: string, stdin: string): Promise<GitResult> {
   try {
-    const proc = Bun.spawn(["git", ...args], { cwd, stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn(["git", ...args], { cwd, env: cleanGitEnv(), stdin: new TextEncoder().encode(stdin), stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
