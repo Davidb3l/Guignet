@@ -13,6 +13,7 @@
  * (core/host.ts): benchmark work is background work, and it must never take
  * the machine away from the user running it.
  */
+import { GIT_REDIRECT_VARS } from "./git.ts";
 import { buildPriorityArgv, demotePriority, type SpawnPriority } from "./host.ts";
 
 /**
@@ -78,18 +79,6 @@ export interface SpawnToFileOptions {
    * where the default escaping is exactly right. Ignored on POSIX. */
   windowsVerbatimArguments?: boolean;
 }
-
-/** Git env vars that redirect git to a DIFFERENT repository than the cwd's. */
-const GIT_REDIRECT_VARS = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-];
 
 /**
  * The environment an agent process runs with: ours, plus `extra`, minus any git
@@ -235,7 +224,9 @@ export async function runShell(cmd: string, opts: ShellOptions): Promise<ShellRe
   try {
     proc = Bun.spawn(buildPriorityArgv(shellArgv(cmd), opts.priority ?? "low"), {
       cwd: opts.cwd,
-      env: opts.env ? { ...process.env, ...opts.env } : process.env,
+      // Same GIT_* scrub as agents: a verifier run from a git hook must not have
+      // its own git calls redirected to the hook's repository.
+      env: agentEnv(opts.env),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

@@ -261,6 +261,17 @@ export function writeVerdict(repoRoot: string, runId: string, v: Verdict): Promi
   return writeJson(join(attemptDir(repoRoot, runId, v.taskId, v.attempt), "verdict.json"), VerdictSchema, v);
 }
 
+/**
+ * Delete an attempt's verdict.json, if any. A verdict belongs to ONE solution.diff;
+ * when an attempt is re-run (`run --force`) its old verdict describes a solution
+ * that no longer exists, and since verdict.json existing is score's resume
+ * marker it would otherwise be skipped as "already scored" and keep charging the
+ * new solution with the old result.
+ */
+export async function removeVerdict(repoRoot: string, runId: string, taskId: string, attempt: number): Promise<void> {
+  await rm(join(attemptDir(repoRoot, runId, taskId, attempt), "verdict.json"), { force: true });
+}
+
 export function verdictExists(repoRoot: string, runId: string, taskId: string, attempt: number): boolean {
   return fsExistsSync(join(attemptDir(repoRoot, runId, taskId, attempt), "verdict.json"));
 }

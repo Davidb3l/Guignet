@@ -320,3 +320,43 @@ describe("changedFiles with unusual path names (-z parsing)", () => {
     expect(scoped.map((f) => `${f.status}:${f.path}`).sort()).toEqual(["A:src/c.ts", "D:src/b.ts"]);
   });
 });
+
+// --- inherited GIT_* repo redirection (the git-hook incident class) ---
+
+describe("an inherited GIT_DIR / GIT_WORK_TREE never redirects Guignet's own git calls", () => {
+  const SAVED = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  afterEach(() => {
+    for (const [k, v] of Object.entries(SAVED)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  test("git() operates on its cwd, and the isolated export never writes into the redirect target", async () => {
+    const { repo, base } = await initRepo(); // the repo Guignet is pointed at
+    const decoy = await tmp(); // a DIFFERENT repo a hook's GIT_DIR would point at
+    await must(["init", "-q"], decoy);
+    const decoyGit = join(decoy, ".git");
+    const configBefore = await readFile(join(decoyGit, "config"), "utf-8");
+
+    process.env.GIT_DIR = decoyGit;
+    process.env.GIT_WORK_TREE = decoy;
+
+    // Plain git(): rev-parse in `repo` must see `repo`, not the decoy.
+    const top = await git(["rev-parse", "--show-toplevel"], repo);
+    expect(top.ok).toBe(true);
+    expect(top.stdout.trim().replaceAll("\\", "/").toLowerCase()).toBe(repo.replaceAll("\\", "/").toLowerCase());
+
+    // The export runs `git init/config/add/commit` inside `dest`; none of that
+    // may land in the decoy repo (config rewritten, commits made).
+    const dest = join(await tmp(), "ws");
+    const r = await createIsolatedWorkspace(repo, base, dest);
+    expect(r).toEqual({ ok: true });
+    delete process.env.GIT_DIR;
+    delete process.env.GIT_WORK_TREE;
+    expect(await readFile(join(decoyGit, "config"), "utf-8")).toBe(configBefore);
+    expect((await git(["rev-list", "--all", "--count"], decoy)).stdout.trim()).toBe("0");
+    // ...and the workspace is its own repo with exactly the snapshot commit.
+    expect((await git(["rev-list", "--all", "--count"], dest)).stdout.trim()).toBe("1");
+  });
+});
