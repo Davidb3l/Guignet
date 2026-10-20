@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, lstatSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -345,7 +345,9 @@ describe("an inherited GIT_DIR / GIT_WORK_TREE never redirects Guignet's own git
     // Plain git(): rev-parse in `repo` must see `repo`, not the decoy.
     const top = await git(["rev-parse", "--show-toplevel"], repo);
     expect(top.ok).toBe(true);
-    expect(top.stdout.trim().replaceAll("\\", "/").toLowerCase()).toBe(repo.replaceAll("\\", "/").toLowerCase());
+    // realpath both sides: macOS tmpdir is a symlink (/var -> /private/var).
+    const norm = async (p: string) => (await realpath(p)).replaceAll("\\", "/").toLowerCase();
+    expect(await norm(top.stdout.trim())).toBe(await norm(repo));
 
     // The export runs `git init/config/add/commit` inside `dest`; none of that
     // may land in the decoy repo (config rewritten, commits made).
